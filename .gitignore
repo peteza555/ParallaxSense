@@ -1,0 +1,10 @@
+# ห้าม commit รหัส Wi-Fi / token NETPIE (เกณฑ์ 4.5 และ E5)
+include/secrets.h
+.env
+
+# PlatformIO
+.pio/
+.vscode/
+
+# OS
+.DS_Store

@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-and-build:
+    name: Unit tests + build firmware (PlatformIO)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+      - run: pip install platformio
+
+      - name: Unit tests on host (env:native)
+        run: pio test -e native
+
+      - name: Use example secrets for the CI build only
+        run: cp include/secrets.h.example include/secrets.h
+
+      - name: Build gateway + node_a
+        run: pio run -e gateway -e node_a
+
+  secret-scan:
+    name: Secret scan (no Wi-Fi passwords / tokens in git)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
