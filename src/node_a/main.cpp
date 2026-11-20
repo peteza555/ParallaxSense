@@ -1,9 +1,10 @@
 // ParallaxSense — Sensor Node A (สวมที่คอ/ศีรษะ)
-// MPU6050 (I2C) + เซนเซอร์แสง 3 ขา (analog/digital) -> ESP-NOW -> Gateway
+// MPU6050 (I2C) + BH1750 (I2C, lux) หรือโมดูลแสง LDR 3 ขา -> ESP-NOW -> Gateway
 //
-// ต่อสาย:
+// ต่อสาย (MPU6050 กับ BH1750 ใช้สาย I2C ร่วมกัน ต่อขนานกันได้เลย):
 //   MPU6050 : VCC -> 3V3, GND -> GND, SDA -> GPIO21, SCL -> GPIO22, AD0 -> GND (address 0x68)
-//   แสง 3 ขา: VCC(+) -> 3V3 (ห้าม 5V), GND(-) -> GND, ขาสัญญาณ -> LIGHT_PIN (ค่าเริ่มต้นใน platformio.ini = D34 analog)
+//   BH1750  : VCC -> 3V3, GND -> GND, SDA -> GPIO21, SCL -> GPIO22, ADDR -> ไม่ต่อ/GND (address 0x23)
+//   (ถ้าใช้โมดูล LDR 3 ขาแทน: VCC -> 3V3, GND -> GND, สัญญาณ -> LIGHT_PIN แล้วตั้ง LIGHT_BH1750=0)
 //   ตั้งค่าเซนเซอร์แสงได้ที่ platformio.ini [env:node_a] build_flags
 
 #include <Arduino.h>
@@ -92,8 +93,9 @@ bool read(Sample &s) {
 }
 }  // namespace mpu
 
-// ---------------- เซนเซอร์แสง 3 ขา ----------------
+// ---------------- เซนเซอร์แสง: BH1750 (lux) หรือโมดูล LDR 3 ขา ----------------
 // ตั้งค่าผ่าน build_flags ใน platformio.ini:
+//   LIGHT_BH1750       1 = ใช้ BH1750 ทาง I2C (ไม่สนค่า LIGHT_* ด้านล่าง), 0 = ใช้โมดูล LDR
 //   LIGHT_ENABLED      1 = ต่อแล้ว, 0 = ยังไม่ต่อ (gateway จะไม่ส่ง a_light)
 //   LIGHT_PIN          ขาที่ต่อสัญญาณ
 //   LIGHT_DIGITAL_ONLY 1 = อ่านแบบ digital สว่าง/มืด (ใช้ขา GPIO ไหนก็ได้ เช่น 19)
@@ -111,17 +113,44 @@ bool read(Sample &s) {
 #ifndef LIGHT_INVERT
 #define LIGHT_INVERT 0
 #endif
+#ifndef LIGHT_BH1750
+#define LIGHT_BH1750 0
+#endif
 
 namespace light {
-const bool  ENABLED       = LIGHT_ENABLED;
+const bool  BH1750        = LIGHT_BH1750;
+const bool  ENABLED       = LIGHT_ENABLED || LIGHT_BH1750;
 const int   PIN           = LIGHT_PIN;
 const bool  DIGITAL_ONLY  = LIGHT_DIGITAL_ONLY;
 const bool  INVERT        = LIGHT_INVERT;
 const float FULL_SCALE_MV = 3100.0f;  // ADC ของ ESP32 อ่านได้สูงสุดราว 3.1 V
 
-void begin() {
-  if (ENABLED && DIGITAL_ONLY) pinMode(PIN, INPUT);
+// BH1750 ระดับ register: ส่ง opcode 1 byte, อ่านค่าดิบ 2 byte (big-endian), lux = raw / 1.2
+const uint8_t  BH_ADDR      = 0x23;  // ขา ADDR ไม่ต่อ/GND (ต่อ 3V3 จะเป็น 0x5C)
+const uint8_t  BH_POWER_ON  = 0x01;
+const uint8_t  BH_CONT_HRES = 0x10;  // วัดต่อเนื่อง ละเอียด 1 lx, ได้ค่าใหม่ทุก ~120 ms
+const uint32_t BH_RETRY_MS  = 5000;  // หาไม่เจอ/หลุด -> ลองใหม่ทุก 5 วินาที (เสียบสายทีหลังได้)
+bool     bhOk = false;
+uint32_t bhLastTry = 0;
+
+bool bhCmd(uint8_t op) {
+  Wire.beginTransmission(BH_ADDR);
+  Wire.write(op);
+  return Wire.endTransmission() == 0;
 }
+
+bool bhBegin() {
+  bhLastTry = millis();
+  bhOk = bhCmd(BH_POWER_ON) && bhCmd(BH_CONT_HRES);
+  return bhOk;
+}
+
+void begin() {
+  if (BH1750) bhBegin();
+  else if (ENABLED && DIGITAL_ONLY) pinMode(PIN, INPUT);
+}
+
+const char *unit() { return BH1750 ? "lx" : "%"; }
 
 // คืนค่าความสว่าง 0-100% (100 = สว่างสุด) — เป็นค่าสัมพัทธ์ ไม่ใช่ lux
 float readPercent() {
@@ -134,6 +163,24 @@ float readPercent() {
     pct = constrain(sumMv / 8.0f / FULL_SCALE_MV * 100.0f, 0.0f, 100.0f);
   }
   return INVERT ? 100.0f - pct : pct;
+}
+
+// อ่านค่าล่าสุด: true = ได้ค่าจริง (BH1750 -> lux, LDR -> %)
+bool read(float &out) {
+  if (BH1750) {
+    if (!bhOk && (millis() - bhLastTry < BH_RETRY_MS || !bhBegin())) return false;
+    if (Wire.requestFrom((int)BH_ADDR, 2) != 2) {
+      bhOk = false;
+      return false;
+    }
+    uint16_t raw = (uint16_t)Wire.read() << 8;
+    raw |= Wire.read();
+    out = raw / 1.2f;
+    return true;
+  }
+  if (!ENABLED) return false;
+  out = readPercent();
+  return true;
 }
 }  // namespace light
 
@@ -164,6 +211,150 @@ void updateAttitude(const mpu::Sample &s, float dt) {
   float gRoll  = wrap180(rollDeg + s.gx * dt);
   pitchDeg = wrap180(gPitch + (1.0f - alpha) * wrap180(accPitch - gPitch));
   rollDeg  = wrap180(gRoll + (1.0f - alpha) * wrap180(accRoll - gRoll));
+}
+
+// ---------------- Calibration ----------------
+// 1) gyro bias : วางนิ่ง ~2 วินาที เฉลี่ยค่า gyro (ควรเป็น 0) แล้วลบออกทุก sample ไม่งั้นมุมค่อย ๆ ไหล
+// 2) ท่าอ้างอิง: เก็บทิศแรงโน้มถ่วงตอน "นั่งตัวตรง" แล้วหมุนทุก sample ให้ทิศนั้นเป็นแกน +Z
+//    => นั่งตรง = pitch/roll 0° ไม่ว่าจะติดบอร์ดเอียง/ตะแคงแค่ไหนในกล่อง
+// ทำตอนบูต และทุกครั้งที่กดปุ่ม BOOT (GPIO0) — ISR แค่ตั้ง flag แล้วไปทำต่อใน loop (deferred processing)
+//
+// ตั้งค่าใน platformio.ini [env:node_a] ถ้าก้มหน้าแล้วค่าไปขยับผิดช่อง:
+//   IMU_SWAP_PITCH_ROLL=1  ก้มหน้าแล้ว roll เปลี่ยนแทน pitch
+//   IMU_INVERT_PITCH=1     ก้มหน้าแล้ว pitch ติดลบ (อยากให้ก้ม = บวก)
+//   IMU_INVERT_ROLL=1      เอียงขวาแล้ว roll ติดลบ
+#ifndef IMU_SWAP_PITCH_ROLL
+#define IMU_SWAP_PITCH_ROLL 0
+#endif
+#ifndef IMU_INVERT_PITCH
+#define IMU_INVERT_PITCH 0
+#endif
+#ifndef IMU_INVERT_ROLL
+#define IMU_INVERT_ROLL 0
+#endif
+
+namespace calib {
+const int      PIN_BUTTON   = 0;     // ปุ่ม BOOT บนบอร์ด ESP32 DevKit
+const int      SAMPLES      = 200;   // 200 x 10 ms = 2 วินาที
+const float    STILL_DPS    = 3.0f;  // gyro แกว่งเกินนี้ = ยังขยับอยู่
+const int      MAX_TRIES    = 5;
+
+float bias[3] = {0, 0, 0};                      // deg/s
+float R[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};  // หมุนทิศ gravity ตอนนั่งตรง -> +Z
+volatile bool requested = false;
+volatile uint32_t lastPressMs = 0;
+
+void IRAM_ATTR onButton() {
+  uint32_t now = millis();
+  if (now - lastPressMs > 500) {  // debounce
+    lastPressMs = now;
+    requested = true;
+  }
+}
+
+static void rotate(float v[3]) {
+  float x = v[0], y = v[1], z = v[2];
+  for (int i = 0; i < 3; i++) v[i] = R[i][0] * x + R[i][1] * y + R[i][2] * z;
+}
+
+// ใช้กับทุก sample ก่อนเข้า filter
+void apply(mpu::Sample &s) {
+  float a[3] = {s.ax, s.ay, s.az};
+  float g[3] = {s.gx - bias[0], s.gy - bias[1], s.gz - bias[2]};
+  rotate(a);
+  rotate(g);
+  s.ax = a[0]; s.ay = a[1]; s.az = a[2];
+  s.gx = g[0]; s.gy = g[1]; s.gz = g[2];
+}
+
+// สร้าง R ที่หมุนเวกเตอร์หนึ่งหน่วย u ไปเป็น (0,0,1) ด้วยสูตร Rodrigues
+static void alignToZ(const float u[3]) {
+  float c = u[2];  // cos มุมระหว่าง u กับ +Z
+  if (c < -0.9999f) {  // คว่ำพอดี: หมุน 180° รอบแกน X
+    float flip[3][3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    memcpy(R, flip, sizeof(R));
+    return;
+  }
+  // v = u x z = (uy, -ux, 0), K = [v]x, R = I + K + K^2 / (1 + c)
+  float vx = u[1], vy = -u[0];
+  float K[3][3] = {{0, 0, vy}, {0, 0, -vx}, {-vy, vx, 0}};
+  float k = 1.0f / (1.0f + c);
+  for (int i = 0; i < 3; i++)
+    for (int j = 0; j < 3; j++) {
+      float k2 = 0;
+      for (int m = 0; m < 3; m++) k2 += K[i][m] * K[m][j];
+      R[i][j] = (i == j ? 1.0f : 0.0f) + K[i][j] + k2 * k;
+    }
+}
+
+// วัดนิ่ง ๆ 2 วินาที: ได้ gyro bias + ทิศ gravity -> ตั้ง R ใหม่ แล้วให้ filter เริ่มใหม่จากท่านี้
+bool run() {
+  Serial.println("[CAL] keep still and sit straight for 2 s ...");
+  for (int attempt = 1; attempt <= MAX_TRIES; attempt++) {
+    double sa[3] = {0, 0, 0}, sg[3] = {0, 0, 0};
+    float gmin[3] = {1e9, 1e9, 1e9}, gmax[3] = {-1e9, -1e9, -1e9};
+    int n = 0;
+    for (int i = 0; i < SAMPLES; i++) {
+      mpu::Sample s;
+      if (mpu::read(s)) {
+        float g[3] = {s.gx, s.gy, s.gz};
+        sa[0] += s.ax; sa[1] += s.ay; sa[2] += s.az;
+        for (int k = 0; k < 3; k++) {
+          sg[k] += g[k];
+          gmin[k] = min(gmin[k], g[k]);
+          gmax[k] = max(gmax[k], g[k]);
+        }
+        n++;
+      }
+      delay(10);
+    }
+    if (n < SAMPLES / 2) {
+      Serial.println("[CAL] FAIL: MPU6050 not responding");
+      return false;
+    }
+    float spread = 0;
+    for (int k = 0; k < 3; k++) spread = max(spread, gmax[k] - gmin[k]);
+    bool still = spread < 2 * STILL_DPS;
+    if (!still && attempt < MAX_TRIES) {
+      Serial.printf("[CAL] moving (gyro spread %.1f dps) -> try again %d/%d\n", spread, attempt + 1, MAX_TRIES);
+      continue;
+    }
+
+    float a[3] = {(float)(sa[0] / n), (float)(sa[1] / n), (float)(sa[2] / n)};
+    float mag = sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+    if (mag < 0.5f) {
+      Serial.println("[CAL] FAIL: accel reads ~0 g");
+      return false;
+    }
+    for (int k = 0; k < 3; k++) {
+      bias[k] = (float)(sg[k] / n);
+      a[k] /= mag;
+    }
+    alignToZ(a);
+    attitudeReady = false;  // filter เริ่มใหม่จากท่าอ้างอิง -> pitch/roll ~ 0
+    Serial.printf("[CAL] %s gyro bias=(%.2f, %.2f, %.2f) dps | gravity=(%.2f, %.2f, %.2f) |g|=%.2f | mount tilt=%.0f deg\n",
+                  still ? "OK" : "WARN (was moving, accepted anyway)", bias[0], bias[1], bias[2], a[0], a[1],
+                  a[2], mag, acosf(constrain(a[2], -1.0f, 1.0f)) * RAD_TO_DEG);
+    if (mag < 0.85f || mag > 1.15f) Serial.println("[CAL] warn: |g| far from 1.0 -> check MPU6050 wiring/mounting");
+    return true;
+  }
+  return false;
+}
+
+void begin() {
+  pinMode(PIN_BUTTON, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIN_BUTTON), onButton, FALLING);
+}
+}  // namespace calib
+
+// ค่าที่ส่งออก (หลังสลับแกน/กลับเครื่องหมายตาม build flag)
+static float outPitch() {
+  float v = IMU_SWAP_PITCH_ROLL ? rollDeg : pitchDeg;
+  return IMU_INVERT_PITCH ? -v : v;
+}
+static float outRoll() {
+  float v = IMU_SWAP_PITCH_ROLL ? pitchDeg : rollDeg;
+  return IMU_INVERT_ROLL ? -v : v;
 }
 
 // ---------------- ESP-NOW ----------------
@@ -223,7 +414,8 @@ bool setupEspNow() {
 
 // ---------------- Main ----------------
 static bool     imuOk = false;
-static float    lightPct = 0;
+static float    lightVal = 0;
+static bool     lightOk = false;
 static uint32_t seq = 0, imuErrors = 0;
 
 void setup() {
@@ -234,12 +426,18 @@ void setup() {
   Wire.begin(PIN_SDA, PIN_SCL, 400000);
   imuOk = mpu::begin();
   light::begin();
-  if (light::ENABLED) {
+  if (light::BH1750) {
+    Serial.printf("[I2C] MPU6050 %s | BH1750 %s\n", imuOk ? "OK" : "FAIL",
+                  light::bhOk ? "OK" : "not found (check SDA/SCL/3V3, will retry every 5 s)");
+  } else if (light::ENABLED) {
     Serial.printf("[I2C] MPU6050 %s | light sensor on GPIO%d (%s)\n", imuOk ? "OK" : "FAIL", light::PIN,
                   light::DIGITAL_ONLY ? "digital" : "analog");
   } else {
     Serial.printf("[I2C] MPU6050 %s | light sensor disabled\n", imuOk ? "OK" : "FAIL");
   }
+  calib::begin();
+  if (imuOk) calib::run();
+  Serial.println("[CAL] press BOOT button anytime to re-zero (sit straight first)");
 
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
@@ -255,6 +453,12 @@ void setup() {
 void loop() {
   static uint32_t lastImuUs = micros(), lastSendMs = 0, lastStatsMs = 0;
 
+  if (calib::requested) {  // กดปุ่ม BOOT -> ISR ตั้ง flag ไว้ มาทำงานหนักตรงนี้
+    calib::requested = false;
+    calib::run();
+    lastImuUs = micros();
+  }
+
   uint32_t nowUs = micros();
   if (nowUs - lastImuUs >= IMU_PERIOD_US) {
     float dt = (nowUs - lastImuUs) / 1e6f;
@@ -263,6 +467,7 @@ void loop() {
     imuOk = mpu::read(s);
     if (imuOk) {
       imuErrors = 0;
+      calib::apply(s);
       updateAttitude(s, dt);
     } else if (++imuErrors >= IMU_REINIT_AFTER) {
       Serial.println("[MPU] read failing -> re-init");
@@ -274,18 +479,19 @@ void loop() {
   uint32_t nowMs = millis();
   if (nowMs - lastSendMs >= SEND_INTERVAL_MS) {
     lastSendMs = nowMs;
-    if (light::ENABLED) lightPct = light::readPercent();
+    lightOk = light::read(lightVal);
 
     NodePacket p = {};
     p.version      = PACKET_VERSION;
     p.node_id      = NODE_A;
-    p.flags        = (imuOk && attitudeReady ? FLAG_IMU_OK : 0) | (light::ENABLED ? FLAG_LIGHT_OK : 0);
+    p.flags        = (imuOk && attitudeReady ? FLAG_IMU_OK : 0) | (lightOk ? FLAG_LIGHT_OK : 0) |
+                     (lightOk && light::BH1750 ? FLAG_LIGHT_LUX : 0);
     p.seq          = ++seq;
     p.uptime_ms    = nowMs;
-    p.pitch_deg    = pitchDeg;
-    p.roll_deg     = rollDeg;
+    p.pitch_deg    = outPitch();
+    p.roll_deg     = outRoll();
     p.gyro_mag_dps = gyroMag;
-    p.light_pct    = lightPct;
+    p.light_pct    = lightOk ? lightVal : 0;
     p.fsr          = 0;
     esp_err_t err = esp_now_send(gatewayMac, (const uint8_t *)&p, sizeof(p));
     if (err != ESP_OK) Serial.printf("[NOW] esp_now_send error %d\n", (int)err);
@@ -301,8 +507,11 @@ void loop() {
     lastStatsMs = nowMs;
     uint32_t ok = sendOk, fail = sendFail;
     float pdr = (ok + fail) ? 100.0f * ok / (ok + fail) : 0;
-    Serial.printf("[A] seq=%lu pitch=%.1f roll=%.1f gyro=%.1f light=%.0f%% | ch=%ld sent ok=%lu fail=%lu (%.1f%%)\n",
-                  (unsigned long)seq, pitchDeg, rollDeg, gyroMag, lightPct, (long)currentChannel,
+    char lightStr[16];
+    if (lightOk) snprintf(lightStr, sizeof(lightStr), "%.0f%s", lightVal, light::unit());
+    else snprintf(lightStr, sizeof(lightStr), "%s", light::ENABLED ? "n/a" : "off");
+    Serial.printf("[A] seq=%lu pitch=%.1f roll=%.1f gyro=%.1f light=%s | ch=%ld sent ok=%lu fail=%lu (%.1f%%)\n",
+                  (unsigned long)seq, outPitch(), outRoll(), gyroMag, lightStr, (long)currentChannel,
                   (unsigned long)ok, (unsigned long)fail, pdr);
   }
 }
