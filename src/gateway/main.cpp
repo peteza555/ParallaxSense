@@ -17,6 +17,9 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <esp_idf_version.h>
+#if __has_include(<esp_arduino_version.h>)
+#include <esp_arduino_version.h>  // ESP_ARDUINO_VERSION_MAJOR (แยก API core 2.x / 3.x)
+#endif
 #include <PubSubClient.h>
 #include "packet.h"
 #if __has_include("secrets.h")
@@ -153,6 +156,13 @@ void pollPir(uint32_t now) {
 bool motionRecent(uint32_t now) { return pirLevel || (pirLastMs != 0 && now - pirLastMs < PIR_HOLD_MS); }
 
 // ---------------- Servo ธงเตือน (PWM 50 Hz จาก LEDC ไม่ต้องใช้ library) ----------------
+// Arduino-ESP32 3.x เปลี่ยน API ของ LEDC: ใช้ "ขา" แทน "channel" และรวม setup+attach เป็น ledcAttach()
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+#define SERVO_LEDC_V3 1
+#else
+#define SERVO_LEDC_V3 0
+#endif
+
 namespace servo {
 const int      CH = 0, FREQ_HZ = 50, RES_BITS = 16;
 const uint32_t MIN_US = 500, MAX_US = 2400;  // SG90: 0° ~ 0.5 ms, 180° ~ 2.4 ms
@@ -161,24 +171,36 @@ int      angle = -1;
 uint32_t movedMs = 0;
 bool     driving = false;
 
+void setDuty(uint32_t duty) {
+#if SERVO_LEDC_V3
+  ledcWrite(PIN_SERVO, duty);
+#else
+  ledcWrite(CH, duty);
+#endif
+}
+
 void write(int deg) {
   if (deg == angle) return;
   angle = deg;
   uint32_t us = MIN_US + (uint32_t)deg * (MAX_US - MIN_US) / 180;
-  ledcWrite(CH, us * ((1u << RES_BITS) - 1) / 20000);
+  setDuty(us * ((1u << RES_BITS) - 1) / 20000);
   movedMs = millis();
   driving = true;
 }
 
 void begin() {
+#if SERVO_LEDC_V3
+  ledcAttach(PIN_SERVO, FREQ_HZ, RES_BITS);
+#else
   ledcSetup(CH, FREQ_HZ, RES_BITS);
   ledcAttachPin(PIN_SERVO, CH);
+#endif
   write(SERVO_DOWN_DEG);
 }
 
 void idle() {
   if (driving && millis() - movedMs > HOLD_MS) {
-    ledcWrite(CH, 0);
+    setDuty(0);
     driving = false;
   }
 }
