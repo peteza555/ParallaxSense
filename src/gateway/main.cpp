@@ -1,10 +1,14 @@
 // ParallaxSense — Gateway (ESP32)
-// รับ ESP-NOW จาก sensor node + อ่าน ultrasonic ของตัวเอง -> NETPIE2020 (MQTT shadow)
+// รับ ESP-NOW จาก sensor node + อ่าน ultrasonic/PIR ของตัวเอง -> NETPIE2020 (MQTT shadow)
+// + ยกธงด้วย servo เมื่อนั่งผิดท่า/ชิดจอเกินไปนานเกิน ALERT_AFTER_MS
 //
-// ต่อสาย HC-SR04:
-//   ใช้ขาฝั่งเดียวกับ VIN/GND ทั้งหมด (ฝั่งซ้ายของบอร์ด)
-//   VCC -> 5V (VIN), GND -> GND, TRIG -> GPIO14
-//   ECHO -> R 1kΩ -> GPIO13 -> R 2kΩ -> GND   (แบ่งแรงดัน 5V -> ~3.3V ห้ามต่อ ECHO ตรงเข้า ESP32)
+// ต่อสาย (ใช้ขาฝั่งเดียวกับ VIN/GND ทั้งหมด = ฝั่งซ้ายของบอร์ด, VIN = 5V จาก USB แชร์กันผ่าน breadboard):
+//   HC-SR04 : VCC -> VIN, GND -> GND, TRIG -> GPIO14
+//             ECHO -> R 1kΩ -> GPIO13 -> R 2kΩ -> GND   (แบ่งแรงดัน 5V -> ~3.3V ห้ามต่อ ECHO ตรงเข้า ESP32)
+//   PIR HC-SR501 : VCC -> VIN, GND -> GND, OUT -> GPIO27  (OUT เป็น 3.3V ต่อตรงได้)
+//                  jumper ตั้ง H (retrigger), หมุน Time ไปทางน้อยสุด — firmware นับเวลาเอง
+//   Servo SG90   : แดง -> VIN, น้ำตาล -> GND, ส้ม (สัญญาณ) -> GPIO26
+//                  ถ้าบอร์ดรีเซ็ตตอน servo ขยับ: ใส่ C 470-1000µF คร่อม VIN-GND ใกล้ servo
 //
 // library PubSubClient ติดตั้งให้อัตโนมัติจาก lib_deps ใน platformio.ini
 
@@ -24,6 +28,8 @@
 // ---------------- Config ----------------
 static const int      PIN_TRIG            = 14;
 static const int      PIN_ECHO            = 13;
+static const int      PIN_PIR             = 27;
+static const int      PIN_SERVO           = 26;
 static const uint32_t ULTRA_PERIOD_MS     = 100;
 static const uint32_t PUBLISH_INTERVAL_MS = 1000;   // ถ้าเปลือง quota NETPIE ปรับเป็น 2000-5000
 static const uint32_t NODE_TIMEOUT_MS     = 3000;   // ไม่ได้ยิน node เกินนี้ = offline
@@ -32,6 +38,15 @@ static const char    *MQTT_HOST           = "mqtt.netpie.io";
 static const uint16_t MQTT_PORT           = 1883;   // checkpoint ใช้ plain ก่อน; ทำ E5 ค่อยเปลี่ยนเป็น 1884 + TLS
 static const char    *TOPIC_SHADOW        = "@shadow/data/update";
 static const int      MAX_NODES           = 4;
+
+// เงื่อนไขยกธง (ปรับได้ตามที่ทดลองจริง)
+static const uint32_t PIR_HOLD_MS         = 30000;  // เห็นการเคลื่อนไหวล่าสุดภายใน 30 s = มีคนอยู่
+static const float    PRESENT_CM          = 120.0f; // หรือ ultrasonic เจออะไรใกล้กว่านี้ = มีคนอยู่
+static const float    TOO_CLOSE_CM        = 40.0f;  // ใกล้จอเกินนี้ = ไม่ดี
+static const float    SLOUCH_PITCH_DEG    = 20.0f;  // ก้ม/เงยเกินนี้ (หลัง calibrate นั่งตรง = 0°) = ไม่ดี
+static const uint32_t ALERT_AFTER_MS      = 5000;   // ต้องไม่ดีต่อเนื่องนานเท่านี้ก่อนยกธง (กันธงกระพริบ)
+static const int      SERVO_DOWN_DEG      = 10;     // ธงลง (เลี่ยง 0/180 ที่ servo บางตัวครางชนสุด)
+static const int      SERVO_UP_DEG        = 100;    // ธงขึ้น
 
 // ---------------- ESP-NOW receive -> queue ----------------
 struct RxItem {
@@ -111,6 +126,64 @@ void handlePacket(const RxItem &it) {
   }
 }
 
+// ---------------- PIR (interrupt) ----------------
+// ISR (ขอบขาขึ้น) แค่นับครั้ง + จดเวลา งานที่เหลือ (presence, publish) ทำใน loop = deferred processing (E2)
+// ระดับสัญญาณปัจจุบันอ่านใน loop ด้วย (pollPir) ไม่พึ่ง ISR อย่างเดียว:
+// ถ้าขอบใดหลุดไป (สายแกว่ง/สัญญาณเด้ง) ค่าจะไม่ค้างผิด
+static const uint32_t    PIR_DEBOUNCE_MS = 50;
+static volatile uint32_t pirLastMs   = 0;   // เวลาล่าสุดที่เห็น OUT = HIGH
+static volatile uint32_t pirRiseMs   = 0;
+static volatile uint32_t pirRises    = 0;   // นับครั้งที่ตรวจพบการเคลื่อนไหว
+static bool              pirLevel    = false;
+
+void IRAM_ATTR onPir() {
+  uint32_t now = millis();
+  if (pirRises == 0 || now - pirRiseMs >= PIR_DEBOUNCE_MS) {
+    pirRises++;
+    pirRiseMs = now;
+  }
+  pirLastMs = now;
+}
+
+void pollPir(uint32_t now) {
+  pirLevel = digitalRead(PIN_PIR);
+  if (pirLevel) pirLastMs = now;  // ค้าง HIGH (คนยังขยับอยู่) = ยังมีคน
+}
+
+bool motionRecent(uint32_t now) { return pirLevel || (pirLastMs != 0 && now - pirLastMs < PIR_HOLD_MS); }
+
+// ---------------- Servo ธงเตือน (PWM 50 Hz จาก LEDC ไม่ต้องใช้ library) ----------------
+namespace servo {
+const int      CH = 0, FREQ_HZ = 50, RES_BITS = 16;
+const uint32_t MIN_US = 500, MAX_US = 2400;  // SG90: 0° ~ 0.5 ms, 180° ~ 2.4 ms
+const uint32_t HOLD_MS = 700;                // ส่งพัลส์ช่วงเดียวพอให้หมุนถึง แล้วหยุด = ไม่สั่น ไม่กินไฟ
+int      angle = -1;
+uint32_t movedMs = 0;
+bool     driving = false;
+
+void write(int deg) {
+  if (deg == angle) return;
+  angle = deg;
+  uint32_t us = MIN_US + (uint32_t)deg * (MAX_US - MIN_US) / 180;
+  ledcWrite(CH, us * ((1u << RES_BITS) - 1) / 20000);
+  movedMs = millis();
+  driving = true;
+}
+
+void begin() {
+  ledcSetup(CH, FREQ_HZ, RES_BITS);
+  ledcAttachPin(PIN_SERVO, CH);
+  write(SERVO_DOWN_DEG);
+}
+
+void idle() {
+  if (driving && millis() - movedMs > HOLD_MS) {
+    ledcWrite(CH, 0);
+    driving = false;
+  }
+}
+}  // namespace servo
+
 // ---------------- Ultrasonic (median ของ 5 ค่าล่าสุด) ----------------
 static float distBuf[5];
 static int   distCount = 0, distIdx = 0;
@@ -159,6 +232,27 @@ float distanceMedianCm() {
     t[j + 1] = v;
   }
   return t[distCount / 2];
+}
+
+// ---------------- ตัดสินใจยกธง ----------------
+struct Alert {
+  bool     present, tooClose, slouch, bad, flagUp;
+  uint32_t badSinceMs;
+};
+static Alert alert = {};
+
+void updateAlert(uint32_t now) {
+  float dist = distanceMedianCm();
+  const NodeState &a = nodes[NODE_A];
+  bool aOnline = a.seen && now - a.last_rx_ms < NODE_TIMEOUT_MS;
+  alert.present  = motionRecent(now) || (dist > 0 && dist < PRESENT_CM);
+  alert.tooClose = dist > 0 && dist < TOO_CLOSE_CM;
+  alert.slouch   = aOnline && (a.last.flags & FLAG_IMU_OK) && fabsf(a.last.pitch_deg) > SLOUCH_PITCH_DEG;
+  bool bad = alert.present && (alert.tooClose || alert.slouch);
+  if (bad && !alert.bad) alert.badSinceMs = now;
+  alert.bad    = bad;
+  alert.flagUp = bad && now - alert.badSinceMs >= ALERT_AFTER_MS;
+  servo::write(alert.flagUp ? SERVO_UP_DEG : SERVO_DOWN_DEG);
 }
 
 // ---------------- Wi-Fi + MQTT ----------------
@@ -230,6 +324,9 @@ void publishShadow() {
   float dist = distanceMedianCm();
   if (dist > 0) j.num("gw_dist_cm", dist);
   j.num("gw_uptime_s", millis() / 1000.0f, 0);
+  j.num("gw_motion", motionRecent(millis()) ? 1 : 0, 0);
+  j.num("gw_present", alert.present ? 1 : 0, 0);
+  j.num("gw_flag", alert.flagUp ? 1 : 0, 0);
 
   uint32_t now = millis();
   for (int id = 1; id <= MAX_NODES; id++) {
@@ -249,7 +346,8 @@ void publishShadow() {
       snprintf(key, sizeof(key), "%c_gyro", t);  j.num(key, n.last.gyro_mag_dps);
     }
     if (n.last.flags & FLAG_LIGHT_OK) {
-      snprintf(key, sizeof(key), "%c_light", t); j.num(key, n.last.light_pct, 0);
+      snprintf(key, sizeof(key), (n.last.flags & FLAG_LIGHT_LUX) ? "%c_lux" : "%c_light", t);
+      j.num(key, n.last.light_pct, 0);
     }
     if (n.last.flags & FLAG_FSR_OK) {
       snprintf(key, sizeof(key), "%c_fsr", t);   j.num(key, n.last.fsr);
@@ -257,8 +355,9 @@ void publishShadow() {
   }
   j.raw("}}");
 
-  Serial.printf("[US] raw=%.1fcm median=%.1fcm ok=%lu fail=%lu\n", lastRawCm, dist,
-                (unsigned long)ultraOk, (unsigned long)ultraFail);
+  Serial.printf("[US] raw=%.1fcm median=%.1fcm ok=%lu fail=%lu | PIR=%d motions=%lu | present=%d close=%d slouch=%d flag=%s\n",
+                lastRawCm, dist, (unsigned long)ultraOk, (unsigned long)ultraFail, (int)pirLevel,
+                (unsigned long)pirRises, alert.present, alert.tooClose, alert.slouch, alert.flagUp ? "UP" : "down");
   ultraOk = ultraFail = 0;
 
   if (!mqtt.connected()) {
@@ -279,6 +378,9 @@ void setup() {
   pinMode(PIN_TRIG, OUTPUT);
   pinMode(PIN_ECHO, INPUT);
   digitalWrite(PIN_TRIG, LOW);
+  pinMode(PIN_PIR, INPUT_PULLDOWN);  // ยังไม่ต่อ PIR -> อ่านได้ LOW ไม่ลอย
+  attachInterrupt(digitalPinToInterrupt(PIN_PIR), onPir, RISING);
+  servo::begin();
 
   rxQueue = xQueueCreate(32, sizeof(RxItem));
   connectWiFi();
@@ -306,7 +408,10 @@ void loop() {
   if (now - lastUltraMs >= ULTRA_PERIOD_MS) {
     lastUltraMs = now;
     sampleUltrasonic();
+    pollPir(now);
+    updateAlert(now);
   }
+  servo::idle();
 
   ensureMqtt();
   mqtt.loop();

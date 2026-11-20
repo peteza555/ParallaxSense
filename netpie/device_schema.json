@@ -3,6 +3,9 @@
   "properties": {
     "gw_dist_cm":  { "type": "number", "operation": { "store": { "ttl": "30d" } } },
     "gw_uptime_s": { "type": "number" },
+    "gw_motion":   { "type": "number", "operation": { "store": { "ttl": "30d" } } },
+    "gw_present":  { "type": "number", "operation": { "store": { "ttl": "30d" } } },
+    "gw_flag":     { "type": "number", "operation": { "store": { "ttl": "30d" } } },
     "a_online":    { "type": "number", "operation": { "store": { "ttl": "30d" } } },
     "a_seq":       { "type": "number" },
     "a_pdr":       { "type": "number", "operation": { "store": { "ttl": "30d" } } },
@@ -10,6 +13,7 @@
     "a_pitch":     { "type": "number", "operation": { "store": { "ttl": "30d" } } },
     "a_roll":      { "type": "number", "operation": { "store": { "ttl": "30d" } } },
     "a_gyro":      { "type": "number", "operation": { "store": { "ttl": "30d" } } },
-    "a_light":     { "type": "number", "operation": { "store": { "ttl": "30d" } } }
+    "a_light":     { "type": "number", "operation": { "store": { "ttl": "30d" } } },
+    "a_lux":       { "type": "number", "operation": { "store": { "ttl": "30d" } } }
   }
 }

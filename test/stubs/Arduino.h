@@ -26,3 +26,10 @@ typedef void* QueueHandle_t; typedef int BaseType_t;
 QueueHandle_t xQueueCreate(int,int); BaseType_t xQueueSend(QueueHandle_t,const void*,int); BaseType_t xQueueReceive(QueueHandle_t,void*,int);
 uint32_t analogReadMilliVolts(uint8_t); int digitalRead(uint8_t);
 #define constrain(amt,low,high) ((amt)<(low)?(low):((amt)>(high)?(high):(amt)))
+#define IRAM_ATTR
+#define INPUT_PULLDOWN 9
+#define CHANGE 3
+#define RISING 1
+#define digitalPinToInterrupt(p) (p)
+void attachInterrupt(uint8_t, void (*)(void), int);
+uint32_t ledcSetup(uint8_t, uint32_t, uint8_t); void ledcAttachPin(uint8_t, uint8_t); void ledcWrite(uint8_t, uint32_t);

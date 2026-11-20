@@ -17,9 +17,16 @@ void delay(uint32_t) {}
 void delayMicroseconds(uint32_t) {}
 void pinMode(int, int) {}
 void digitalWrite(int, int) {}
-int digitalRead(uint8_t) { return 0; }
+static int fake_pir = 0;
+int digitalRead(uint8_t) { return fake_pir; }
 uint32_t analogReadMilliVolts(uint8_t) { return 0; }
-unsigned long pulseIn(int, int, unsigned long) { return 2900; }  // 2900 us / 58 = 50 cm
+static unsigned long fake_echo_us = 2900;  // 2900 us / 58 = 50 cm
+unsigned long pulseIn(int, int, unsigned long) { return fake_echo_us; }
+void attachInterrupt(uint8_t, void (*)(void), int) {}
+static uint32_t servo_duty = 0;
+uint32_t ledcSetup(uint8_t, uint32_t, uint8_t) { return 50; }
+void ledcAttachPin(uint8_t, uint8_t) {}
+void ledcWrite(uint8_t, uint32_t d) { servo_duty = d; }
 HwSerial Serial;
 void HwSerial::begin(int) {}
 int HwSerial::printf(const char *, ...) { return 0; }
@@ -76,13 +83,13 @@ bool PubSubClient::publish(const char *, const char *p) {
 // ---------------- helpers ----------------
 static bool has(const std::string &s, const char *needle) { return s.find(needle) != std::string::npos; }
 
-static void sendPkt(uint32_t seq, uint8_t flags, uint8_t version = PACKET_VERSION) {
+static void sendPkt(uint32_t seq, uint8_t flags, uint8_t version = PACKET_VERSION, float pitch = -23.45f) {
   NodePacket p = {};
   p.version      = version;
   p.node_id      = NODE_A;
   p.flags        = flags;
   p.seq          = seq;
-  p.pitch_deg    = -23.45f;
+  p.pitch_deg    = pitch;
   p.roll_deg     = 4.2f;
   p.gyro_mag_dps = 1.5f;
   p.light_pct    = 100.0f;
@@ -109,7 +116,9 @@ void test_boot_publishes_gateway_fields_only() {
     fake_ms = i * 100;
     loop();
   }
-  TEST_ASSERT_EQUAL_STRING("{\"data\":{\"gw_dist_cm\":50.0,\"gw_uptime_s\":1}}", publishAt(1000).c_str());
+  TEST_ASSERT_EQUAL_STRING(
+      "{\"data\":{\"gw_dist_cm\":50.0,\"gw_uptime_s\":1,\"gw_motion\":0,\"gw_present\":1,\"gw_flag\":0}}",
+      publishAt(1000).c_str());
 }
 
 void test_pdr_counts_gaps_and_ignores_duplicates() {
@@ -155,6 +164,88 @@ void test_publishes_once_per_second_with_valid_json() {
   }
 }
 
+// ---------------- ธงเตือน (servo) / PIR / lux ----------------
+static uint32_t servoDutyFor(int deg) {
+  uint32_t us = servo::MIN_US + (uint32_t)deg * (servo::MAX_US - servo::MIN_US) / 180;
+  return us * 65535 / 20000;
+}
+
+// เดินเวลาไปทีละ 100 ms ตั้งแต่ from ถึง to; ส่ง packet จาก node A ทุก 200 ms ด้วย pitch ที่กำหนด
+static uint32_t nextSeq = 100;
+static void runFor(uint32_t from, uint32_t to, float pitch, bool sendNode = true) {
+  for (uint32_t t = from; t <= to; t += 100) {
+    fake_ms = t;
+    if (sendNode && t % 200 == 0) sendPkt(nextSeq++, FLAG_IMU_OK, PACKET_VERSION, pitch);
+    loop();
+  }
+}
+
+void test_flag_rises_only_after_slouching_5s() {
+  runFor(10000, 14000, -23.45f);  // ก้ม 23° มา 4 วินาที -> ยังไม่ยก
+  TEST_ASSERT_FALSE(alert.flagUp);
+  TEST_ASSERT_TRUE(alert.slouch);
+  runFor(14100, 15500, -23.45f);  // เกิน 5 วินาที -> ยกธง
+  TEST_ASSERT_TRUE(alert.flagUp);
+  TEST_ASSERT_TRUE_MESSAGE(has(published.back(), "\"gw_flag\":1"), published.back().c_str());
+  runFor(15600, 16500, -23.45f);  // ส่งพัลส์ครบแล้วหยุด PWM (servo ไม่สั่น)
+  TEST_ASSERT_EQUAL_UINT32(0, servo_duty);
+  TEST_ASSERT_EQUAL_INT(SERVO_UP_DEG, servo::angle);
+}
+
+void test_flag_drops_immediately_when_posture_ok() {
+  runFor(16600, 16800, 3.0f);
+  TEST_ASSERT_FALSE(alert.flagUp);
+  TEST_ASSERT_EQUAL_UINT32(servoDutyFor(SERVO_DOWN_DEG), servo_duty);
+}
+
+void test_too_close_raises_flag_without_node() {
+  fake_echo_us = 30 * 58;  // 30 cm < TOO_CLOSE_CM
+  runFor(20000, 26000, 0, false);
+  TEST_ASSERT_TRUE(alert.tooClose);
+  TEST_ASSERT_FALSE(alert.slouch);  // node A เงียบไปแล้ว ไม่เอามาคิด
+  TEST_ASSERT_TRUE(alert.flagUp);
+  fake_echo_us = 2900;
+  runFor(26100, 27000, 0, false);
+  TEST_ASSERT_FALSE(alert.flagUp);
+}
+
+void test_pir_interrupt_marks_motion_for_hold_time() {
+  fake_echo_us = 0;  // ultrasonic ไม่เจออะไร -> presence มาจาก PIR อย่างเดียว
+  runFor(28000, 29000, 0, false);
+  TEST_ASSERT_FALSE(alert.present);
+  fake_ms = 29050;
+  fake_pir = 1; onPir();
+  onPir();  // สายเด้ง: ขอบขึ้นซ้ำภายใน 50 ms ไม่นับซ้ำ
+  fake_pir = 0;  // PIR ปล่อยแล้ว
+  std::string p = publishAt(30000);
+  TEST_ASSERT_TRUE_MESSAGE(has(p, "\"gw_motion\":1"), p.c_str());
+  TEST_ASSERT_TRUE(alert.present);
+  TEST_ASSERT_FALSE(pirLevel);  // ระดับปัจจุบันอ่านจาก loop ไม่ค้างที่ 1
+  TEST_ASSERT_EQUAL_UINT32(1, pirRises);
+  runFor(30100, 29050 + PIR_HOLD_MS + 100, 0, false);  // เลย 30 s -> ไม่นับว่ามีคน
+  TEST_ASSERT_FALSE(alert.present);
+}
+
+void test_pir_level_polled_even_if_interrupt_missed() {
+  uint32_t t0 = fake_ms + 100;
+  fake_pir = 1;  // OUT ค้าง HIGH แต่ไม่มี ISR (ขอบหลุด)
+  runFor(t0, t0 + 200, 0, false);
+  TEST_ASSERT_TRUE(pirLevel);
+  TEST_ASSERT_TRUE(alert.present);
+  fake_pir = 0;
+  runFor(t0 + 300, t0 + 300, 0, false);
+  TEST_ASSERT_FALSE(pirLevel);   // ลงทันที
+  TEST_ASSERT_TRUE(alert.present);  // แต่ยังนับว่ามีคนภายใน PIR_HOLD_MS
+  fake_echo_us = 2900;
+}
+
+void test_bh1750_lux_published_as_a_lux() {
+  sendPkt(nextSeq++, FLAG_IMU_OK | FLAG_LIGHT_OK | FLAG_LIGHT_LUX);  // light_pct = 100 -> 100 lx
+  std::string p = publishAt(fake_ms + 1000);
+  TEST_ASSERT_TRUE_MESSAGE(has(p, "\"a_lux\":100"), p.c_str());
+  TEST_ASSERT_FALSE_MESSAGE(has(p, "a_light"), p.c_str());
+}
+
 int main(int, char **) {
   UNITY_BEGIN();
   RUN_TEST(test_boot_publishes_gateway_fields_only);
@@ -163,5 +254,11 @@ int main(int, char **) {
   RUN_TEST(test_rejects_wrong_packet_version);
   RUN_TEST(test_node_restart_and_missing_imu);
   RUN_TEST(test_publishes_once_per_second_with_valid_json);
+  RUN_TEST(test_flag_rises_only_after_slouching_5s);
+  RUN_TEST(test_flag_drops_immediately_when_posture_ok);
+  RUN_TEST(test_too_close_raises_flag_without_node);
+  RUN_TEST(test_pir_interrupt_marks_motion_for_hold_time);
+  RUN_TEST(test_pir_level_polled_even_if_interrupt_missed);
+  RUN_TEST(test_bh1750_lux_published_as_a_lux);
   return UNITY_END();
 }

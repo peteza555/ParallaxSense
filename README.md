@@ -1,7 +1,7 @@
 # ParallaxSense — Checkpoint (PlatformIO)
 
 ```
-Node A (ESP32: MPU6050 + เซนเซอร์แสง) --ESP-NOW--> Gateway (ESP32: HC-SR04) --MQTT--> NETPIE2020 --> Freeboard dashboard
+Node A (ESP32: MPU6050 + BH1750) --ESP-NOW--> Gateway (ESP32: HC-SR04 + PIR + servo ธง) --MQTT--> NETPIE2020 --> Freeboard dashboard
 ```
 
 ## โครงสร้าง
@@ -9,8 +9,8 @@ Node A (ESP32: MPU6050 + เซนเซอร์แสง) --ESP-NOW--> Gateway
 | Path | ทำอะไร |
 |---|---|
 | `platformio.ini` | env `gateway`, `node_a` (ESP32) และ `native` (unit test บนคอม) |
-| `src/node_a/main.cpp` | Node A: driver MPU6050 ระดับ register, pitch/roll, เซนเซอร์แสง, ส่ง ESP-NOW 5 Hz |
-| `src/gateway/main.cpp` | Gateway: รับ ESP-NOW, อ่าน ultrasonic, คำนวณ PDR, publish ขึ้น NETPIE ทุก 1 วินาที |
+| `src/node_a/main.cpp` | Node A: driver MPU6050 / BH1750 ระดับ register, calibrate ท่านั่ง (ปุ่ม BOOT), pitch/roll, ส่ง ESP-NOW 5 Hz |
+| `src/gateway/main.cpp` | Gateway: รับ ESP-NOW, อ่าน ultrasonic + PIR (interrupt), ยกธง servo, คำนวณ PDR, publish ขึ้น NETPIE ทุก 1 วินาที |
 | `include/packet.h` | Message format node → gateway (ใช้ร่วมกันทั้งสองบอร์ด) |
 | `include/secrets.h.example` | แม่แบบรหัส Wi-Fi / NETPIE / MAC ของ gateway |
 | `netpie/device_schema.json` | Device Schema ของ NETPIE ให้เก็บค่าลง Feed (raw data สำหรับ M5) |
@@ -33,22 +33,31 @@ Node A (ESP32: MPU6050 + เซนเซอร์แสง) --ESP-NOW--> Gateway
 | MPU6050 VCC / GND | 3V3 / GND |
 | MPU6050 SDA / SCL | D21 / D22 |
 | MPU6050 AD0 | GND (address 0x68) |
-| เซนเซอร์แสง VCC (`+`) / GND (`-`) | 3V3 / GND (ห้ามใช้ 5V) |
-| เซนเซอร์แสง ขาสัญญาณ (`DO` หรือ `S`) | D34 (อ่านแบบ analog) |
+| BH1750 VCC / GND | 3V3 / GND |
+| BH1750 SDA / SCL | D21 / D22 (ต่อขนานกับ MPU6050 ได้เลย) |
+| BH1750 ADDR | ไม่ต่อ หรือ GND (address 0x23) |
 
-ตั้งค่าเซนเซอร์แสงใน `platformio.ini` ส่วน `[env:node_a]`:
-- ยังไม่ได้ต่อ → `LIGHT_ENABLED=0`
-- เอามือบังแล้วค่ากลับด้าน → `LIGHT_INVERT=1`
-- อยากอ่านแบบ digital (สว่าง/มืด) ที่ขาอื่น → `LIGHT_PIN=19` และ `LIGHT_DIGITAL_ONLY=1`
+BH1750 ส่งค่าเป็น lux ขึ้น dashboard ชื่อ `a_lux` — ถ้ายังไม่ได้ต่อ firmware จะลองหาใหม่ทุก 5 วินาที (เสียบทีหลังได้)
 
-**Gateway** (HC-SR04 ส่ง ECHO ออกมา 5V ต้องแบ่งแรงดันก่อนเข้า ESP32; ทุกขาอยู่ฝั่งเดียวกับ VIN)
+ใช้โมดูล LDR 3 ขาแทน BH1750: ตั้ง `LIGHT_BH1750=0`, `LIGHT_ENABLED=1` ใน `platformio.ini` แล้วต่อขาสัญญาณที่ D34
+(VCC 3V3 ห้าม 5V; เอามือบังแล้วค่ากลับด้าน → `LIGHT_INVERT=1`) ค่าจะขึ้นเป็น `a_light` 0-100%
 
-| HC-SR04 | ESP32 |
-|---|---|
-| VCC | VIN (5V, ต้องเสียบ USB) |
-| GND | GND |
-| TRIG | D14 |
-| ECHO | ผ่าน R 1kΩ ไป D13 และจาก D13 ผ่าน R 2kΩ ลง GND |
+**Gateway** (ทุกขาอยู่ฝั่งเดียวกับ VIN; VIN/GND ใช้ร่วมกันผ่านราง breadboard)
+
+| อุปกรณ์ | ขาอุปกรณ์ | ESP32 |
+|---|---|---|
+| HC-SR04 | VCC / GND | VIN (5V, ต้องเสียบ USB) / GND |
+| HC-SR04 | TRIG | D14 |
+| HC-SR04 | ECHO | ผ่าน R 1kΩ ไป D13 และจาก D13 ผ่าน R 2kΩ ลง GND (ECHO ออก 5V ต้องแบ่งแรงดัน) |
+| PIR HC-SR501 | VCC / GND | VIN / GND |
+| PIR HC-SR501 | OUT | D27 (OUT เป็น 3.3V ต่อตรงได้) — jumper ที่ H, หมุน Time ไปน้อยสุด |
+| Servo SG90 | แดง / น้ำตาล | VIN / GND |
+| Servo SG90 | ส้ม (สัญญาณ) | D26 |
+
+ถ้า ESP32 รีเซ็ตตอน servo หมุน (ไฟ USB ตก) ให้ใส่ตัวเก็บประจุ 470-1000 µF คร่อม VIN-GND ใกล้ servo
+
+ธงจะยกขึ้นเมื่อ **มีคนอยู่** (PIR เห็นการเคลื่อนไหวภายใน 30 s หรือ ultrasonic < 120 cm) และ
+**ก้ม/เงยเกิน 20°** หรือ **ใกล้จอ < 40 cm** ต่อเนื่อง 5 วินาที — ปรับค่าได้ที่ต้น `src/gateway/main.cpp`
 
 ## ตั้งค่า NETPIE2020
 
@@ -56,7 +65,8 @@ Node A (ESP32: MPU6050 + เซนเซอร์แสง) --ESP-NOW--> Gateway
 2. copy **Client ID / Token / Secret** ไปใส่ `include/secrets.h`
 3. แท็บ **Schema** → วางเนื้อหา `netpie/device_schema.json` แล้ว Save
 4. **Freeboard** → เพิ่ม datasource เป็น device นี้ → เพิ่ม widget:
-   Gauge `a_pitch`, Gauge `gw_dist_cm`, Indicator `a_light` (สว่าง/มืด), Text `a_pdr`, Indicator `a_online`
+   Gauge `a_pitch`, Gauge `gw_dist_cm`, Text `a_lux`, Text `a_pdr`, Indicator `a_online`,
+   Indicator `gw_present` (มีคน), Indicator `gw_flag` (ธงเตือน)
 
 ## Upload
 
@@ -91,7 +101,9 @@ Serial ของ gateway ควรเห็นประมาณนี้:
 | `[MQTT] FAIL rc=4` หรือ `rc=5` | Client ID / Token / Secret ผิด |
 | `[I2C] MPU6050 FAIL` | SDA/SCL สลับ, ไม่ได้ต่อ 3V3, ขา header ไม่ได้บัดกรี |
 | ไม่มี `gw_dist_cm` ใน payload | TRIG/ECHO สลับ, ไม่ได้จ่าย 5V, วัตถุใกล้กว่า 2 cm |
-| ค่า `light` กระโดดมั่ว | ขาสัญญาณไม่ได้อยู่ D34 หรือยังไม่ได้ต่อ (ตั้ง `LIGHT_ENABLED=0`) |
+| `BH1750 not found` / `light=n/a` | SDA/SCL ไม่ได้ต่อร่วมกับ MPU6050 ที่ D21/D22 หรือไม่ได้จ่าย 3V3 |
+| `PIR=0` ตลอด | OUT ไม่ได้อยู่ D27, หรือ PIR ยังอุ่นเครื่องไม่เสร็จ (รอ ~1 นาทีหลังจ่ายไฟ) |
+| ESP32 รีเซ็ตตอนธงขยับ | ไฟ USB ไม่พอ ใส่ C 470-1000 µF คร่อม VIN-GND หรือแยกไฟ 5V ให้ servo (GND ต่อร่วมกัน) |
 
 ## Tests และ CI
 
