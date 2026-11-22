@@ -40,6 +40,8 @@ static const uint32_t MQTT_RETRY_MS       = 5000;
 static const char    *MQTT_HOST           = "mqtt.netpie.io";
 static const uint16_t MQTT_PORT           = 1883;   // checkpoint ใช้ plain ก่อน; ทำ E5 ค่อยเปลี่ยนเป็น 1884 + TLS
 static const char    *TOPIC_SHADOW        = "@shadow/data/update";
+static const char    *TOPIC_AI            = "@msg/ai";  // ผลจาก ai/posture_ai.py บน laptop (device อื่นใน Group เดียวกัน)
+static const uint32_t AI_TIMEOUT_MS       = 5000;       // ไม่ได้ยิน AI เกินนี้ = ไม่เอาผล AI มาคิด
 static const int      MAX_NODES           = 4;
 
 // เงื่อนไขยกธง (ปรับได้ตามที่ทดลองจริง)
@@ -256,9 +258,53 @@ float distanceMedianCm() {
   return t[distCount / 2];
 }
 
+// ---------------- ผลจาก AI (MQTT @msg/ai) ----------------
+// payload เช่น {"bad":1,"p":0.873,"present":1}  (bad = AI ตัดสินว่าท่าไม่ดี, p = ความน่าจะเป็นที่ท่าไม่ดี)
+struct AiState {
+  bool     seen, bad, present;
+  float    p;
+  uint32_t rx_ms, count, badMsgs;
+};
+static AiState ai = {};
+
+// หาเลขหลัง "key": ใน JSON แบบแบน ๆ (payload เล็ก ไม่ต้องใช้ library)
+static bool jsonNum(const char *s, const char *key, float &out) {
+  char pat[24];
+  snprintf(pat, sizeof(pat), "\"%s\":", key);
+  const char *q = strstr(s, pat);
+  if (!q) return false;
+  q += strlen(pat);
+  while (*q == ' ') q++;
+  char *end;
+  float v = strtof(q, &end);
+  if (end == q) return false;
+  out = v;
+  return true;
+}
+
+bool handleAiMessage(const uint8_t *payload, unsigned int len, uint32_t now) {
+  char buf[128];
+  float bad, p, present = 1;
+  if (len == 0 || len >= sizeof(buf)) return false;
+  memcpy(buf, payload, len);
+  buf[len] = 0;
+  if (!jsonNum(buf, "bad", bad) || !jsonNum(buf, "p", p)) return false;
+  jsonNum(buf, "present", present);
+  ai.seen    = true;
+  ai.bad     = bad >= 0.5f;
+  ai.p       = constrain(p, 0.0f, 1.0f);
+  ai.present = present >= 0.5f;
+  ai.rx_ms   = now;
+  ai.count++;
+  return true;
+}
+
+bool aiFresh(uint32_t now) { return ai.seen && now - ai.rx_ms < AI_TIMEOUT_MS; }
+
 // ---------------- ตัดสินใจยกธง ----------------
+// รวมผลจาก 3 แหล่ง: IMU ที่คอ (slouch), ultrasonic (tooClose), AI จากกล้อง (aiBad) -> ข้อใดข้อหนึ่งนาน 5 s = ยกธง
 struct Alert {
-  bool     present, tooClose, slouch, bad, flagUp;
+  bool     present, tooClose, slouch, aiBad, bad, flagUp;
   uint32_t badSinceMs;
 };
 static Alert alert = {};
@@ -267,10 +313,12 @@ void updateAlert(uint32_t now) {
   float dist = distanceMedianCm();
   const NodeState &a = nodes[NODE_A];
   bool aOnline = a.seen && now - a.last_rx_ms < NODE_TIMEOUT_MS;
-  alert.present  = motionRecent(now) || (dist > 0 && dist < PRESENT_CM);
+  bool aiOk = aiFresh(now);
+  alert.present  = motionRecent(now) || (dist > 0 && dist < PRESENT_CM) || (aiOk && ai.present);
   alert.tooClose = dist > 0 && dist < TOO_CLOSE_CM;
   alert.slouch   = aOnline && (a.last.flags & FLAG_IMU_OK) && fabsf(a.last.pitch_deg) > SLOUCH_PITCH_DEG;
-  bool bad = alert.present && (alert.tooClose || alert.slouch);
+  alert.aiBad    = aiOk && ai.present && ai.bad;
+  bool bad = alert.present && (alert.tooClose || alert.slouch || alert.aiBad);
   if (bad && !alert.bad) alert.badSinceMs = now;
   alert.bad    = bad;
   alert.flagUp = bad && now - alert.badSinceMs >= ALERT_AFTER_MS;
@@ -281,6 +329,11 @@ void updateAlert(uint32_t now) {
 WiFiClient   net;
 PubSubClient mqtt(net);
 static uint32_t publishCount = 0;
+
+// รันใน mqtt.loop() (context ของ loop ไม่ใช่ ISR) งานเบา ๆ: parse แล้วเก็บค่า
+void onMqttMessage(char *topic, uint8_t *payload, unsigned int len) {
+  if (strcmp(topic, TOPIC_AI) == 0 && !handleAiMessage(payload, len, millis())) ai.badMsgs++;
+}
 
 void printMacForNode() {
   uint8_t m[6];
@@ -318,6 +371,8 @@ void ensureMqtt() {
   Serial.print("[MQTT] connecting to NETPIE ... ");
   if (mqtt.connect(NETPIE_CLIENT_ID, NETPIE_TOKEN, NETPIE_SECRET)) {
     Serial.println("OK");
+    bool sub = mqtt.subscribe(TOPIC_AI);  // ต้อง subscribe ใหม่ทุกครั้งที่ต่อใหม่
+    Serial.printf("[MQTT] subscribe %s %s\n", TOPIC_AI, sub ? "OK" : "FAILED");
   } else {
     // -4 timeout, 4 bad credentials, 5 unauthorized: เช็ก Client ID / Token / Secret
     Serial.printf("FAIL rc=%d\n", mqtt.state());
@@ -349,6 +404,11 @@ void publishShadow() {
   j.num("gw_motion", motionRecent(millis()) ? 1 : 0, 0);
   j.num("gw_present", alert.present ? 1 : 0, 0);
   j.num("gw_flag", alert.flagUp ? 1 : 0, 0);
+  if (ai.seen) {
+    bool aiOk = aiFresh(millis());
+    j.num("ai_online", aiOk ? 1 : 0, 0);
+    if (aiOk) j.num("ai_bad", ai.bad ? 1 : 0, 0);
+  }
 
   uint32_t now = millis();
   for (int id = 1; id <= MAX_NODES; id++) {
@@ -377,9 +437,10 @@ void publishShadow() {
   }
   j.raw("}}");
 
-  Serial.printf("[US] raw=%.1fcm median=%.1fcm ok=%lu fail=%lu | PIR=%d motions=%lu | present=%d close=%d slouch=%d flag=%s\n",
+  Serial.printf("[US] raw=%.1fcm median=%.1fcm ok=%lu fail=%lu | PIR=%d motions=%lu | present=%d close=%d slouch=%d ai=%s flag=%s\n",
                 lastRawCm, dist, (unsigned long)ultraOk, (unsigned long)ultraFail, (int)pirLevel,
-                (unsigned long)pirRises, alert.present, alert.tooClose, alert.slouch, alert.flagUp ? "UP" : "down");
+                (unsigned long)pirRises, alert.present, alert.tooClose, alert.slouch,
+                !aiFresh(millis()) ? "off" : (ai.bad ? "BAD" : "ok"), alert.flagUp ? "UP" : "down");
   ultraOk = ultraFail = 0;
 
   if (!mqtt.connected()) {
@@ -416,6 +477,7 @@ void setup() {
   Serial.println("[NOW] ready, waiting for nodes ...");
 
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
+  mqtt.setCallback(onMqttMessage);
   mqtt.setBufferSize(1024);
   mqtt.setSocketTimeout(5);
 }

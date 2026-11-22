@@ -1,0 +1,9 @@
+{
+  "additionalProperties": true,
+  "properties": {
+    "ai_bad":     { "type": "number", "operation": { "store": { "ttl": "30d" } } },
+    "ai_conf":    { "type": "number", "operation": { "store": { "ttl": "30d" } } },
+    "ai_present": { "type": "number", "operation": { "store": { "ttl": "30d" } } },
+    "ai_fps":     { "type": "number", "operation": { "store": { "ttl": "30d" } } }
+  }
+}

@@ -71,13 +71,29 @@ PubSubClient::PubSubClient(WiFiClient &) {}
 void PubSubClient::setServer(const char *, uint16_t) {}
 bool PubSubClient::setBufferSize(uint16_t) { return true; }
 void PubSubClient::setSocketTimeout(uint16_t) {}
-bool PubSubClient::connect(const char *, const char *, const char *) { return true; }
-bool PubSubClient::connected() { return true; }
+static bool mqtt_up = false;
+bool PubSubClient::connect(const char *, const char *, const char *) { return mqtt_up = true; }
+bool PubSubClient::connected() { return mqtt_up; }
 int PubSubClient::state() { return 0; }
 bool PubSubClient::loop() { return true; }
 bool PubSubClient::publish(const char *, const char *p) {
   published.push_back(p);
   return true;
+}
+static MqttCallback mqtt_cb = nullptr;
+static std::vector<std::string> subscribed;
+PubSubClient &PubSubClient::setCallback(MqttCallback cb) {
+  mqtt_cb = cb;
+  return *this;
+}
+bool PubSubClient::subscribe(const char *t) {
+  subscribed.push_back(t);
+  return true;
+}
+// จำลอง NETPIE ส่งข้อความเข้ามา (เหมือนตอน mqtt.loop() เรียก callback)
+static void mqttIn(const char *topic, const char *payload) {
+  std::string t = topic;
+  mqtt_cb(&t[0], (uint8_t *)payload, (unsigned int)strlen(payload));
 }
 
 // ---------------- helpers ----------------
@@ -246,6 +262,41 @@ void test_bh1750_lux_published_as_a_lux() {
   TEST_ASSERT_FALSE_MESSAGE(has(p, "a_light"), p.c_str());
 }
 
+// ---------------- AI จาก laptop (@msg/ai) ----------------
+void test_subscribes_to_ai_topic_on_connect() {
+  TEST_ASSERT_EQUAL_UINT32(1, subscribed.size());
+  TEST_ASSERT_EQUAL_STRING("@msg/ai", subscribed[0].c_str());
+}
+
+void test_ai_bad_raises_flag_then_ignored_when_stale() {
+  uint32_t t0 = fake_ms + 4000;  // node A เงียบไปแล้ว (offline) -> ไม่มี slouch จาก IMU
+  runFor(t0, t0 + 1000, 0, false);
+  TEST_ASSERT_FALSE(alert.slouch);
+  TEST_ASSERT_FALSE(alert.flagUp);
+  for (uint32_t t = t0 + 1100; t <= t0 + 7100; t += 100) {  // AI ส่งทุก 1 s ว่าท่าไม่ดี
+    fake_ms = t;
+    if (t % 1000 == 100) mqttIn("@msg/ai", "{\"bad\":1,\"p\":0.91,\"present\":1}");
+    loop();
+  }
+  TEST_ASSERT_TRUE(alert.aiBad);
+  TEST_ASSERT_TRUE(alert.flagUp);
+  TEST_ASSERT_TRUE_MESSAGE(has(published.back(), "\"ai_online\":1,\"ai_bad\":1"), published.back().c_str());
+  runFor(t0 + 7200, t0 + 13000, 0, false);  // laptop หยุดส่งเกิน 5 s -> ไม่เอาผล AI มาคิด
+  TEST_ASSERT_FALSE(alert.aiBad);
+  TEST_ASSERT_FALSE(alert.flagUp);
+  TEST_ASSERT_TRUE_MESSAGE(has(published.back(), "\"ai_online\":0"), published.back().c_str());
+  TEST_ASSERT_FALSE_MESSAGE(has(published.back(), "ai_bad"), published.back().c_str());
+}
+
+void test_ai_ignores_malformed_and_other_topics() {
+  uint32_t n = ai.count, badN = ai.badMsgs;
+  mqttIn("@msg/ai", "hello");
+  mqttIn("@msg/ai", "{\"p\":0.5}");                   // ไม่มี bad
+  mqttIn("@msg/other", "{\"bad\":1,\"p\":1}");     // topic อื่นไม่สน
+  TEST_ASSERT_EQUAL_UINT32(n, ai.count);
+  TEST_ASSERT_EQUAL_UINT32(badN + 2, ai.badMsgs);
+}
+
 int main(int, char **) {
   UNITY_BEGIN();
   RUN_TEST(test_boot_publishes_gateway_fields_only);
@@ -260,5 +311,8 @@ int main(int, char **) {
   RUN_TEST(test_pir_interrupt_marks_motion_for_hold_time);
   RUN_TEST(test_pir_level_polled_even_if_interrupt_missed);
   RUN_TEST(test_bh1750_lux_published_as_a_lux);
+  RUN_TEST(test_subscribes_to_ai_topic_on_connect);
+  RUN_TEST(test_ai_bad_raises_flag_then_ignored_when_stale);
+  RUN_TEST(test_ai_ignores_malformed_and_other_topics);
   return UNITY_END();
 }

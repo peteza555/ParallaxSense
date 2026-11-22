@@ -56,8 +56,8 @@ BH1750 ส่งค่าเป็น lux ขึ้น dashboard ชื่อ `a
 
 ถ้า ESP32 รีเซ็ตตอน servo หมุน (ไฟ USB ตก) ให้ใส่ตัวเก็บประจุ 470-1000 µF คร่อม VIN-GND ใกล้ servo
 
-ธงจะยกขึ้นเมื่อ **มีคนอยู่** (PIR เห็นการเคลื่อนไหวภายใน 30 s หรือ ultrasonic < 120 cm) และ
-**ก้ม/เงยเกิน 20°** หรือ **ใกล้จอ < 40 cm** ต่อเนื่อง 5 วินาที — ปรับค่าได้ที่ต้น `src/gateway/main.cpp`
+ธงจะยกขึ้นเมื่อ **มีคนอยู่** (PIR เห็นการเคลื่อนไหวภายใน 30 s, ultrasonic < 120 cm หรือ AI เห็นคน) และ
+**ก้ม/เงยเกิน 20°**, **ใกล้จอ < 40 cm** หรือ **AI จากกล้องบอกว่าท่าไม่ดี** ต่อเนื่อง 5 วินาที — ปรับค่าได้ที่ต้น `src/gateway/main.cpp`
 
 ## ตั้งค่า NETPIE2020
 
@@ -89,6 +89,33 @@ Serial ของ gateway ควรเห็นประมาณนี้:
 [RX] node A seq=35 pitch=-21.4 roll=2.0 gyro=1.3 light=100% rssi=-38 PDR=100.0%
 [MQTT] published #12 {"data":{"gw_dist_cm":48.6,"gw_uptime_s":14,"a_online":1,...}}
 ```
+
+## AI ท่านั่ง (USB webcam บน laptop)
+
+USB webcam หนีบกลางขอบบนจอ ให้เห็นหัว + ไหล่ทั้งสองข้าง, แสงมาจากด้านหน้า
+MediaPipe Pose (pre-trained) หาจุดบนร่างกาย → RandomForest ที่เทรนจากข้อมูลของผู้ใช้เองตัดสิน good/bad
+ส่งแค่ผลลัพธ์ขึ้น NETPIE (`@msg/ai` และ shadow `ai_bad`, `ai_conf`) ไม่ส่งภาพ
+
+```bash
+python -m venv ai/.venv
+ai/.venv/Scripts/python -m pip install -r ai/requirements.txt     # macOS/Linux: ai/.venv/bin/python
+
+ai/.venv/Scripts/python ai/posture_ai.py cams            # หา index กล้อง (ใช้กับ --cam N)
+ai/.venv/Scripts/python ai/posture_ai.py check           # กล้อง + MediaPipe ใช้ได้ไหม
+ai/.venv/Scripts/python ai/posture_ai.py collect good    # นั่งตรง 60 วินาที
+ai/.venv/Scripts/python ai/posture_ai.py collect bad     # ก้ม / ห่อไหล่ / เอียง / ชิดจอ 60 วินาที
+ai/.venv/Scripts/python ai/posture_ai.py train           # accuracy + confusion matrix -> ai/model/metrics.json
+ai/.venv/Scripts/python ai/posture_ai.py run             # ใช้งานจริง (q / ESC ออก)
+```
+
+- เก็บข้อมูลหลายรอบ (หลาย session) ได้ ข้อมูลต่อท้ายใน `ai/data/posture.csv` แล้ว `train` ใหม่
+- accuracy วัดจาก 20% ท้ายของแต่ละ session (ไม่สุ่มแบ่ง เพราะเฟรมติดกันเหมือนกันมาก จะได้ค่าสูงเกินจริง)
+- ย้ายกล้อง/เปลี่ยนคน → collect + train ใหม่
+- ส่งขึ้น NETPIE: สร้าง device `parallaxsense-ai` ใน Group เดียวกับ gateway, วาง `netpie/ai_device_schema.json`
+  ในแท็บ Schema, คัดลอก `ai/.env.example` เป็น `ai/.env` แล้วใส่ key (ไฟล์นี้ไม่ขึ้น git)
+- Gateway subscribe `@msg/ai`: AI บอกว่าท่าไม่ดีต่อเนื่อง 5 วินาที → ยกธง (closed loop, M4)
+  ถ้าไม่ได้ยิน AI เกิน 5 วินาที (ปิด laptop) gateway ตัดผล AI ออกแล้วใช้ IMU + ultrasonic ต่อตามปกติ
+  shadow ของ gateway มี `ai_online` / `ai_bad` ให้ dashboard ใช้ datasource เดียว
 
 ## แก้ปัญหาที่เจอบ่อย
 

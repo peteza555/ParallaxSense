@@ -8,3 +8,9 @@ include/secrets.h
 
 # OS
 .DS_Store
+
+# AI (laptop)
+ai/.venv/
+__pycache__/
+ai/model/*.task
+ai/model/*.joblib

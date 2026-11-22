@@ -6,6 +6,8 @@
     "gw_motion":   { "type": "number", "operation": { "store": { "ttl": "30d" } } },
     "gw_present":  { "type": "number", "operation": { "store": { "ttl": "30d" } } },
     "gw_flag":     { "type": "number", "operation": { "store": { "ttl": "30d" } } },
+    "ai_online":   { "type": "number", "operation": { "store": { "ttl": "30d" } } },
+    "ai_bad":      { "type": "number", "operation": { "store": { "ttl": "30d" } } },
     "a_online":    { "type": "number", "operation": { "store": { "ttl": "30d" } } },
     "a_seq":       { "type": "number" },
     "a_pdr":       { "type": "number", "operation": { "store": { "ttl": "30d" } } },
