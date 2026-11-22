@@ -12,7 +12,11 @@
   ai/.venv/Scripts/python ai/posture_ai.py collect bad        อัดท่านั่งไม่ดี: ก้ม / ห่อไหล่ / เอียง / ชิดจอ
   ai/.venv/Scripts/python ai/posture_ai.py train              เทรน + รายงาน accuracy -> ai/model/
   ai/.venv/Scripts/python ai/posture_ai.py run                ใช้งานจริง + ส่งขึ้น NETPIE (ถ้ามี ai/.env)
-ตัวเลือก: --cam N (index กล้อง), --secs N (เวลาอัด), --no-window
+ตัวเลือก: --cam N (index กล้อง), --secs N (เวลาอัด), --who NAME (ชื่อโฟลเดอร์ข้อมูล; ค่าเริ่มต้น = git user.name),
+          --no-window
+
+ช่วยกันเก็บข้อมูลหลายคน: git pull -> collect good/bad -> git add ai/data/<ชื่อตัวเอง>/ -> commit -> push
+train ใช้ข้อมูลของทุกคนใน ai/data/ และรายงาน accuracy กับ "คนที่โมเดลไม่เคยเห็น" ด้วย
 """
 from __future__ import annotations
 
@@ -34,7 +38,7 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
-DATA_CSV = ROOT / "data" / "posture.csv"
+DATA_DIR = ROOT / "data"  # ai/data/<ชื่อคน>/<session>.csv : 1 รอบที่อัด = 1 ไฟล์ -> หลายคน commit พร้อมกันไม่ conflict
 MODEL_DIR = ROOT / "model"
 MODEL_PATH = MODEL_DIR / "posture_model.joblib"
 METRICS_PATH = MODEL_DIR / "metrics.json"
@@ -222,14 +226,28 @@ def cmd_check(args):
     det.close()
 
 
+def who_am_i(arg: str | None) -> str:
+    """ชื่อโฟลเดอร์ข้อมูลของคนที่อัด: --who หรือ git user.name"""
+    name = arg
+    if not name:
+        try:
+            import subprocess
+            name = subprocess.run(["git", "config", "user.name"], capture_output=True, text=True, cwd=ROOT).stdout.strip()
+        except OSError:
+            name = ""
+    name = "".join(ch for ch in (name or os.environ.get("USERNAME", "") or "anon").lower() if ch.isalnum() or ch in "-_")
+    return name or "anon"
+
+
 def cmd_collect(args):
     label = args.label
-    DATA_CSV.parent.mkdir(parents=True, exist_ok=True)
-    new_file = not DATA_CSV.exists()
+    person = who_am_i(args.who)
     session = time.strftime("%Y%m%d-%H%M%S") + "-" + label
+    out = DATA_DIR / person / f"{session}.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
     cap, det = open_camera(args.cam), PoseDetector()
     win = not args.no_window
-    print(f"[COLLECT] label={label} for {args.secs}s, session={session}")
+    print(f"[COLLECT] {person}: label={label} for {args.secs}s -> {out.relative_to(ROOT.parent)}")
     if label == "bad":
         print("[COLLECT] vary it: lean head down, hunch shoulders, lean left/right, move close to screen")
     else:
@@ -245,10 +263,9 @@ def cmd_collect(args):
             return
 
     rows, t0 = 0, time.time()
-    with DATA_CSV.open("a", newline="") as fh:
+    with out.open("w", newline="") as fh:
         wr = csv.writer(fh)
-        if new_file:
-            wr.writerow(["t", "session", "label"] + FEATURES)
+        wr.writerow(["t", "session", "label"] + FEATURES)
         while time.time() - t0 < args.secs:
             ok, frame = cap.read()
             if not ok:
@@ -270,18 +287,31 @@ def cmd_collect(args):
     cap.release()
     det.close()
     cv2.destroyAllWindows()
-    print(f"[COLLECT] saved {rows} rows -> {DATA_CSV}")
+    if rows == 0:
+        out.unlink(missing_ok=True)
+        print("[COLLECT] nothing recorded (no upper body in view)")
+    else:
+        print(f"[COLLECT] saved {rows} rows -> {out.relative_to(ROOT.parent)}")
+        print(f"[COLLECT] share it: git add {out.parent.relative_to(ROOT.parent).as_posix()}/ && git commit && git push")
 
 
 def load_data():
-    if not DATA_CSV.exists():
+    """อ่านทุกไฟล์ใน ai/data/**.csv -> X, y, session, person (ชื่อโฟลเดอร์)"""
+    X, y, sess, person = [], [], [], []
+    for f in sorted(DATA_DIR.rglob("*.csv")):
+        who = f.parent.name if f.parent != DATA_DIR else "unknown"
+        with f.open(newline="") as fh:
+            for r in csv.DictReader(fh):
+                try:
+                    X.append([float(r[k]) for k in FEATURES])
+                except (KeyError, ValueError):
+                    sys.exit(f"[TRAIN] {f} has different columns -> collect it again with this version")
+                y.append(1 if r["label"] == "bad" else 0)
+                sess.append(f"{who}/{r['session']}")
+                person.append(who)
+    if not X:
         sys.exit("[TRAIN] no data yet -> run: collect good / collect bad")
-    with DATA_CSV.open() as fh:
-        rows = list(csv.DictReader(fh))
-    X = np.array([[float(r[k]) for k in FEATURES] for r in rows], dtype=np.float32)
-    y = np.array([1 if r["label"] == "bad" else 0 for r in rows])
-    sess = np.array([r["session"] for r in rows])
-    return X, y, sess
+    return np.array(X, dtype=np.float32), np.array(y), np.array(sess), np.array(person)
 
 
 def build_model():
@@ -299,9 +329,12 @@ def cmd_train(_args):
     import joblib
     from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
-    X, y, sess = load_data()
+    X, y, sess, person = load_data()
     if len(set(y)) < 2:
         sys.exit("[TRAIN] need both 'good' and 'bad' data")
+    people = sorted(set(person))
+    per_person = {p: {"good": int(((person == p) & (y == 0)).sum()), "bad": int(((person == p) & (y == 1)).sum())} for p in people}
+    print("[TRAIN] data: " + ", ".join(f"{p} (good={c['good']} bad={c['bad']})" for p, c in per_person.items()))
     # เฟรมที่ติดกันหน้าตาเหมือนกันมาก ถ้าสุ่มแบ่งจะได้ accuracy สูงเกินจริง
     # จึงแบ่งตามเวลา: 20% ท้ายของแต่ละ session เป็นชุดทดสอบ
     test = np.zeros(len(y), dtype=bool)
@@ -322,6 +355,20 @@ def cmd_train(_args):
     top = sorted(zip(FEATURES, rf.feature_importances_), key=lambda t: -t[1])[:6]
     print("[TRAIN] most useful features: " + ", ".join(f"{k}={v:.2f}" for k, v in top))
 
+    # leave-one-person-out: เทรนด้วยคนอื่นทั้งหมด แล้วทดสอบกับคนที่โมเดลไม่เคยเห็น (วัดว่าใช้กับคนใหม่ได้ไหม)
+    lopo = {}
+    for p in people:
+        held = person == p
+        if len(people) < 2 or len(set(y[~held])) < 2:
+            continue
+        m = build_model().fit(X[~held], y[~held])
+        lopo[p] = round(float(accuracy_score(y[held], m.predict(X[held]))), 4)
+    if lopo:
+        print("[TRAIN] accuracy on an unseen person: " + ", ".join(f"{p}={v * 100:.1f}%" for p, v in lopo.items())
+              + f" | mean={np.mean(list(lopo.values())) * 100:.1f}%")
+    else:
+        print("[TRAIN] (need data from 2+ people for the unseen-person test)")
+
     final = build_model().fit(X, y)  # โมเดลที่ใช้จริงเทรนด้วยข้อมูลทั้งหมด
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     joblib.dump({"model": final, "features": FEATURES, "trained_at": time.strftime("%Y-%m-%d %H:%M:%S")}, MODEL_PATH)
@@ -330,6 +377,8 @@ def cmd_train(_args):
         "confusion_matrix": cm.tolist(),
         "rows_good": int((y == 0).sum()), "rows_bad": int((y == 1).sum()),
         "sessions": int(len(np.unique(sess))),
+        "people": per_person,
+        "unseen_person_accuracy": lopo,
         "top_features": [[k, round(float(v), 3)] for k, v in top],
         "trained_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }, indent=2))
@@ -474,6 +523,7 @@ def main():
     ap.add_argument("label", nargs="?", choices=["good", "bad"], help="for collect")
     ap.add_argument("--cam", type=int, default=0, help="camera index (see: cams)")
     ap.add_argument("--secs", type=int, default=60, help="collect duration in seconds")
+    ap.add_argument("--who", help="collect: name of your data folder (default: git user.name)")
     ap.add_argument("--no-window", action="store_true", help="do not open a preview window")
     ap.add_argument("--max-secs", type=int, default=0, help="run: stop after N seconds (0 = until q/ESC)")
     args = ap.parse_args()

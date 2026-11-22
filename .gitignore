@@ -14,3 +14,4 @@ ai/.venv/
 __pycache__/
 ai/model/*.task
 ai/model/*.joblib
+ai/model/metrics.json

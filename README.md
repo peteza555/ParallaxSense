@@ -108,7 +108,17 @@ ai/.venv/Scripts/python ai/posture_ai.py train           # accuracy + confusion 
 ai/.venv/Scripts/python ai/posture_ai.py run             # ใช้งานจริง (q / ESC ออก)
 ```
 
-- เก็บข้อมูลหลายรอบ (หลาย session) ได้ ข้อมูลต่อท้ายใน `ai/data/posture.csv` แล้ว `train` ใหม่
+- 1 รอบที่อัด = 1 ไฟล์ `ai/data/<ชื่อ git>/<เวลา>-good|bad.csv` (ข้อมูลเป็นพิกัดจุดบนร่างกาย ไม่มีภาพ)
+- `train` ใช้ข้อมูลทุกคนใน `ai/data/` และถ้ามี 2 คนขึ้นไปจะบอก accuracy กับ "คนที่โมเดลไม่เคยเห็น" ด้วย
+
+**ช่วยกันเก็บข้อมูล** (ทุกคนในกลุ่ม แต่ละคนอยู่ในโฟลเดอร์ของตัวเอง push พร้อมกันไม่ conflict):
+```bash
+git pull
+ai/.venv/Scripts/python ai/posture_ai.py collect good      # 60 วินาที x 2 รอบ
+ai/.venv/Scripts/python ai/posture_ai.py collect bad       # ก้ม / ห่อไหล่ / เอียง / ชิดจอ อย่างละ ~15 วินาที
+git add ai/data/<ชื่อตัวเอง>/ && git commit -m "AI data: <ชื่อ>" && git push
+```
+ใครจะใช้งาน `run` ก็ `git pull` แล้ว `train` บนเครื่องตัวเอง (ไฟล์โมเดล `.joblib` และ `metrics.json` ไม่ขึ้น git)
 - accuracy วัดจาก 20% ท้ายของแต่ละ session (ไม่สุ่มแบ่ง เพราะเฟรมติดกันเหมือนกันมาก จะได้ค่าสูงเกินจริง)
 - ย้ายกล้อง/เปลี่ยนคน → collect + train ใหม่
 - ส่งขึ้น NETPIE: สร้าง device `parallaxsense-ai` ใน Group เดียวกับ gateway, วาง `netpie/ai_device_schema.json`
