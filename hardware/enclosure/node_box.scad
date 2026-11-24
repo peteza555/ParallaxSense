@@ -9,12 +9,13 @@
 //   openscad -D part=\"b_lid\"   -o node_b_lid.stl   node_box.scad
 //   openscad -D part=\"fsr_base\" -o fsr_base.stl    node_box.scad   (พิมพ์ 2 ชุด ซ้าย/ขวา)
 //   openscad -D part=\"fsr_top\"  -o fsr_top.stl     node_box.scad
+//   openscad -D part=\"fsr_clip\" -o fsr_clip.stl    node_box.scad   (ฝาครอบหางสาย)
 // พิมพ์: PLA, layer 0.2 mm, infill 20%, กล่องวางปากขึ้น, ฝาคว่ำ — ไม่ต้องใช้ support
 //
 // การสวม Node A: พื้นกล่องแนบหลังคอ, ร้อยสายรัด/สายคล้องกว้าง ≤ 25 mm ผ่านหูสองข้าง
 //   ด้านยาวฝั่งที่มีรูแสง (y = in_y) ให้หันขึ้นด้านบน
 
-part = "assembly";  // a_box | a_lid | b_box | b_lid | fsr_base | fsr_top | assembly
+part = "assembly";  // a_box | a_lid | b_box | b_lid | fsr_base | fsr_top | fsr_clip | assembly
 $fn = 48;
 
 // ---------- โครงกล่อง ----------
@@ -53,10 +54,40 @@ fsr_slot = [14, 6];
 lug_len = 7;  strap_w = 26;  strap_t = 3.5;
 
 // ---------- FSR406 ----------
-fsr_sz   = 44.0;   // ตัวแผ่น 43.7 mm  << วัดจริง
+fsr_sz   = 45.6;   // วัดจริง 45 mm + เผื่อ 0.3 mm ต่อด้าน
 fsr_tail = 9;      // ความกว้างหาง
-pad_sz   = 58;  pad_t = 3;
+pad_sz   = 62;  pad_t = 3;
 puck_d   = 30;  puck_h = 1.2;
+fsr_t    = 0.45;   // ความหนาแผ่น FSR  << วัดจริง
+// เสาสกรูมุม: แผ่นบนสวมเสา ลอยขึ้นลงได้ แต่ถูกแหวนรองใต้หัวสกรูกันไม่ให้หลุด
+//   ขันสกรูแน่นได้เต็มที่ เพราะสกรูกดหัวเสา ไม่ได้กดแผ่นบน -> เซนเซอร์ไม่ถูกกดค้าง
+//   ใช้ได้ทั้งวางเบาะและติดพนักพิง (แนวตั้ง)
+top_gap    = puck_h - (0.8 - fsr_t);   // ช่องว่างใต้แผ่นบน ≈ 0.85
+post_d     = 5;    post_float = 0.5;   // ระยะที่แผ่นบนขยับขึ้นได้
+fpost_h    = top_gap + pad_t + post_float;   // เสาสูงเหนือผิว base
+post_pilot = 2.5;  // รูนำสกรูเกลียวปล่อย M3
+top_hole   = post_d + 0.6;
+// ส่วนป้องกันหางสาย: ลิ้นยื่นจาก base + ฝาครอบ (clip) + ช่องเข็มขัดรัดสาย
+//   หางยาวรวมจุดต่อสาย 40 mm: ฟิล์มอยู่ในร่องตื้น, จุดต่อ/บัดกรีอยู่ในโพรงลึกใต้ clip,
+//   zip tie รัดเฉพาะสายไฟถัดจาก clip ออกไป (ไม่รัดบนฟิล์ม)
+tail_len   = 40;   // หางทั้งหมดรวมส่วนต่อสาย  (วัดจริง)
+conn_len   = 10;   // ช่วงปลายหางที่เป็นจุดต่อสาย/บัดกรี  << วัดจริง
+conn_extra = 6;    // ให้ clip ครอบเลยปลายหางไปอีก (ปลอกหด/หัวบัดกรี)
+conn_h     = 3.2;  // ความสูงโพรงจุดต่อ = ร่องในลิ้น 1.8 + ร่องใต้ clip 1.4
+pocket_d   = 1.8;
+clip_t     = 3;
+tongue_w   = 24;
+pin_dx     = fsr_tail / 2 + 3.5;   // หมุดยึด clip อยู่สองข้างร่อง
+zip_slot   = [2.2, 4.5];           // ช่องเข็มขัดรัดสาย (zip tie กว้าง ≤ 3.6 mm)
+wire_ch    = [6, 1.0];             // ร่องวางสายไฟช่วง zip tie (กว้าง, ลึก)
+
+tail_y0    = (pad_sz - fsr_sz) / 2 + 0.3;   // ขอบเซนเซอร์ฝั่งหาง
+tail_end_y = tail_y0 - tail_len;            // ปลายหาง
+pocket_y1  = tail_end_y + conn_len + 1;     // จุดเริ่มโพรงจุดต่อ
+clip_y0    = tail_end_y - conn_extra;       // ปลาย clip
+zip_y0     = clip_y0 - 2 - zip_slot[1];
+tongue_len = -zip_y0 + 3;
+clip_pin_y = [-5, clip_y0 + 4];
 
 // ======================================================================
 module rbox(s, r = 2) {
@@ -119,20 +150,47 @@ module node_lid() {
   }
 }
 
-// แผ่นรอง FSR: base มีร่องวางแผ่น + ร่องหาง, top มีปุ่มนูนกดลงกลางแผ่น
+// แผ่นรอง FSR: base มีร่องวางแผ่น + ร่องหาง + เสาสกรูมุม, top มีปุ่มนูนกดลงกลางแผ่น
 pin_xy = [[5, 5], [pad_sz - 5, 5], [5, pad_sz - 5], [pad_sz - 5, pad_sz - 5]];
 module fsr_base() {
+  cx = pad_sz / 2;
   difference() {
-    rbox([pad_sz, pad_sz, pad_t], 3);
+    union() {
+      rbox([pad_sz, pad_sz, pad_t], 3);
+      translate([cx - tongue_w / 2, -tongue_len, 0]) rbox([tongue_w, tongue_len + 3, pad_t], 3);
+    }
     translate([(pad_sz - fsr_sz) / 2, (pad_sz - fsr_sz) / 2, pad_t - 0.8]) cube([fsr_sz, fsr_sz, 1]);
-    translate([pad_sz / 2 - fsr_tail / 2, -1, pad_t - 0.8]) cube([fsr_tail, (pad_sz - fsr_sz) / 2 + 2, 1]);
+    // ร่องฟิล์มหาง (ตื้น 0.8)
+    translate([cx - fsr_tail / 2, pocket_y1 - 1, pad_t - 0.8]) cube([fsr_tail, tail_y0 - pocket_y1 + 2, 1]);
+    // โพรงจุดต่อสาย (ลึก pocket_d) ถึงปลาย clip
+    translate([cx - fsr_tail / 2, clip_y0 - 0.01, pad_t - pocket_d]) cube([fsr_tail, pocket_y1 - clip_y0, pocket_d + 1]);
+    // ร่องสายไฟช่วง zip tie จนสุดลิ้น
+    translate([cx - wire_ch[0] / 2, -tongue_len - 1, pad_t - wire_ch[1]]) cube([wire_ch[0], tongue_len + clip_y0 + 2, wire_ch[1] + 1]);
+    // ช่อง zip tie + ร่องใต้ลิ้นให้ตัวรัดจม แผ่นไม่โยก
+    for (s = [-1, 1]) translate([cx + s * pin_dx - zip_slot[0] / 2, zip_y0, -1]) cube([zip_slot[0], zip_slot[1], pad_t + 2]);
+    translate([cx - pin_dx, zip_y0, -1]) cube([2 * pin_dx, zip_slot[1], 1.8]);
   }
-  for (p = pin_xy) translate([p[0], p[1], pad_t]) cylinder(d = 3, h = 2.5);
+  for (p = pin_xy) translate([p[0], p[1], 0]) difference() {
+    cylinder(d = post_d, h = pad_t + fpost_h);
+    translate([0, 0, pad_t + fpost_h - 6]) cylinder(d = post_pilot, h = 7);
+  }
+  for (s = [-1, 1], y = clip_pin_y) translate([cx + s * pin_dx, y, pad_t]) cylinder(d = 3, h = 2.5);
+}
+// ฝาครอบหางสาย: สวมหมุด 4 ตัวบนลิ้น (ทากาวได้) ครอบฟิล์ม + จุดต่อสายทั้งหมด
+// ร่องฟิล์มลึก 0.8 > หาง ~0.45 mm จึงไม่บีบฟิล์ม; ช่วงจุดต่อมีที่ว่างสูง conn_h
+module fsr_clip() {
+  len = -clip_y0;
+  difference() {
+    rbox([tongue_w, len, clip_t], 2);
+    for (s = [-1, 1], y = clip_pin_y) translate([tongue_w / 2 + s * pin_dx, y - clip_y0, -1])
+      cylinder(d = 3.2, h = clip_t + 2);   // 3.2 ให้สวมแน่นกับหมุด Ø3
+    translate([tongue_w / 2 - fsr_tail / 2, -1, -1]) cube([fsr_tail, pocket_y1 - clip_y0 + 1, 1 + conn_h - pocket_d]);
+  }
 }
 module fsr_top() {
   difference() {
     rbox([pad_sz, pad_sz, pad_t], 3);
-    for (p = pin_xy) translate([p[0], p[1], -1]) cylinder(d = 3.5, h = pad_t + 2);
+    for (p = pin_xy) translate([p[0], p[1], -1]) cylinder(d = top_hole, h = pad_t + 2);
   }
   translate([pad_sz / 2, pad_sz / 2, -puck_h]) cylinder(d = puck_d, h = puck_h);  // พิมพ์โดยคว่ำ ปุ่มอยู่ด้านบน
 }
@@ -153,6 +211,7 @@ else if (part == "b_box")    node_box("b");
 else if (part == "a_lid" || part == "b_lid") node_lid();
 else if (part == "fsr_base") fsr_base();
 else if (part == "fsr_top")  rotate([180, 0, 0]) fsr_top();
+else if (part == "fsr_clip") fsr_clip();
 else {
   // Node A
   color("Gainsboro") node_box("a");  dummies("a");
@@ -163,6 +222,16 @@ else {
   translate([120, -75, -floor_t]) {
     color("Wheat") fsr_base();
     color("Orange", 0.9) translate([(pad_sz - fsr_sz) / 2, (pad_sz - fsr_sz) / 2, pad_t - 0.6]) cube([fsr_sz, fsr_sz, 0.5]);
+    color("Orange", 0.9) translate([pad_sz / 2 - fsr_tail / 2 + 0.5, tail_end_y, pad_t - 0.6])
+      cube([fsr_tail - 1, tail_len, 0.4]);
+    color("Silver") translate([pad_sz / 2 - 3.5, tail_end_y, pad_t - pocket_d]) cube([7, conn_len, 2.4]);
+    for (s = [-1, 1]) color(s < 0 ? "Red" : "Black")
+      translate([pad_sz / 2 + s * 1.5, tail_end_y + 4, pad_t - 0.5]) rotate([90, 0, 0]) cylinder(d = 1.5, h = tongue_len + tail_end_y + 12);
     color("Tan", 0.8) translate([0, 0, pad_t + 20]) fsr_top();
+    for (p = pin_xy) color("Silver") translate([p[0], p[1], pad_t + fpost_h + 24]) {
+      cylinder(d = 9, h = 0.8);                        // แหวนรอง M3 (OD ≥ 8)
+      translate([0, 0, 0.8]) cylinder(d = 5.5, h = 2);  // หัวสกรู
+    }
+    color("Tan", 0.8) translate([(pad_sz - tongue_w) / 2, clip_y0, pad_t + 12]) fsr_clip();
   }
 }
