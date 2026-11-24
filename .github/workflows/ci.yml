@@ -25,8 +25,8 @@ jobs:
       - name: Use example secrets for the CI build only
         run: cp include/secrets.h.example include/secrets.h
 
-      - name: Build gateway + node_a
-        run: pio run -e gateway -e node_a
+      - name: Build gateway + node_a + node_b
+        run: pio run -e gateway -e node_a -e node_b
 
   secret-scan:
     name: Secret scan (no Wi-Fi passwords / tokens in git)

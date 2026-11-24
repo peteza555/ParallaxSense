@@ -8,8 +8,9 @@ Node A (ESP32: MPU6050 + BH1750) --ESP-NOW--> Gateway (ESP32: HC-SR04 + PIR + se
 
 | Path | ทำอะไร |
 |---|---|
-| `platformio.ini` | env `gateway`, `node_a` (ESP32) และ `native` (unit test บนคอม) |
+| `platformio.ini` | env `gateway`, `node_a`, `node_b` (ESP32) และ `native` (unit test บนคอม) |
 | `src/node_a/main.cpp` | Node A: driver MPU6050 / BH1750 ระดับ register, calibrate ท่านั่ง (ปุ่ม BOOT), pitch/roll, ส่ง ESP-NOW 5 Hz |
+| `src/node_b/main.cpp` | Node B: MPU6050 gyro/accelerometer calibrate ท่านั่งเก้าอี้ / analog FSR 2 ตัว, pitch/roll, ส่ง ESP-NOW 5 Hz |
 | `src/gateway/main.cpp` | Gateway: รับ ESP-NOW, อ่าน ultrasonic + PIR (interrupt), ยกธง servo, คำนวณ PDR, publish ขึ้น NETPIE ทุก 1 วินาที |
 | `include/packet.h` | Message format node → gateway (ใช้ร่วมกันทั้งสองบอร์ด) |
 | `include/secrets.h.example` | แม่แบบรหัส Wi-Fi / NETPIE / MAC ของ gateway |
@@ -41,6 +42,23 @@ BH1750 ส่งค่าเป็น lux ขึ้น dashboard ชื่อ `a
 
 ใช้โมดูล LDR 3 ขาแทน BH1750: ตั้ง `LIGHT_BH1750=0`, `LIGHT_ENABLED=1` ใน `platformio.ini` แล้วต่อขาสัญญาณที่ D34
 (VCC 3V3 ห้าม 5V; เอามือบังแล้วค่ากลับด้าน → `LIGHT_INVERT=1`) ค่าจะขึ้นเป็น `a_light` 0-100%
+
+**Node B**
+
+| ขา | ESP32 |
+|---|---|
+| MPU6050 VCC / GND | 3V3 / GND |
+| MPU6050 SDA / SCL | D21 / D22 |
+| MPU6050 AD0 | GND (address 0x68) |
+| FSR 1 terminal | 3V3 |
+| FSR 1 other terminal | D32 (ADC1), with 10 kΩ resistor from D32 to GND |
+| FSR 2 terminal | 3V3 |
+| FSR 2 other terminal | D33 (ADC1), with 10 kΩ resistor from D33 to GND |
+
+FSR เป็นตัวต้านทานจึงไม่มีขั้ว; วงจรแบ่งแรงดันด้านบนทำให้แรงดัน ADC เพิ่มเมื่อกด FSR และจำกัดให้ไม่เกิน 3.3 V.
+ส่งค่าแรงดันที่ normalize เป็น 0-100% ไปที่ dashboard `b_fsr1` และ `b_fsr2` (ไม่ใช่หน่วยแรง/น้ำหนักที่ calibrate แล้ว).
+ตั้ง `FSR1_PIN`, `FSR2_PIN`, `FSR_FULL_SCALE_MV`, และ `FSR_INVERT` ใน `[env:node_b]` ของ `platformio.ini`.
+MPU6050 ให้ทั้ง accelerometer และ gyroscope สำหรับคำนวณ pitch/roll กับ gyro magnitude.
 
 **Gateway** (ทุกขาอยู่ฝั่งเดียวกับ VIN; VIN/GND ใช้ร่วมกันผ่านราง breadboard)
 
@@ -75,11 +93,13 @@ BH1750 ส่งค่าเป็น lux ขึ้น dashboard ชื่อ `a
 1. **Gateway ก่อน**: แถบล่างของ VS Code เลือก `env:gateway` → Upload → Serial Monitor
    จะเห็นบรรทัด `#define GATEWAY_MAC {0x..., ...}` ให้ copy ไปแทนบรรทัด `GATEWAY_MAC` ใน `include/secrets.h`
 2. **Node A**: เลือก `env:node_a` → Upload → Serial Monitor
+3. **Node B**: เลือก `env:node_b` → Upload → Serial Monitor
 
 หรือใช้คำสั่ง:
 ```bash
 pio run -e gateway -t upload && pio device monitor -e gateway
 pio run -e node_a  -t upload && pio device monitor -e node_a
+pio run -e node_b  -t upload && pio device monitor -e node_b
 ```
 
 Serial ของ gateway ควรเห็นประมาณนี้:
@@ -152,7 +172,6 @@ pio test -e native     # unit test logic ของ gateway: PDR, online/offline,
 
 ## งานหลัง checkpoint
 
-- Node B (FSR + IMU): เพิ่ม `src/node_b/` และ `[env:node_b]` ใช้ `include/packet.h` เดิม ตั้ง `node_id = NODE_B`
 - E4: gateway ส่ง ACK ตาม `seq` + buffer ลง LittleFS ตอน NETPIE หลุด
 - E5: เปลี่ยนเป็น `WiFiClientSecure` + พอร์ต 1884 (MQTTS ของ NETPIE)
 - E1: แยก sampling / filter / comms / watchdog เป็น FreeRTOS tasks บน Node A

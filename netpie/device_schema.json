@@ -16,6 +16,12 @@
     "a_roll":      { "type": "number", "operation": { "store": { "ttl": "30d" } } },
     "a_gyro":      { "type": "number", "operation": { "store": { "ttl": "30d" } } },
     "a_light":     { "type": "number", "operation": { "store": { "ttl": "30d" } } },
-    "a_lux":       { "type": "number", "operation": { "store": { "ttl": "30d" } } }
+    "a_lux":       { "type": "number", "operation": { "store": { "ttl": "30d" } } },
+    "b_online":    { "type": "number", "operation": { "store": { "ttl": "30d" } } },
+    "b_pitch":     { "type": "number", "operation": { "store": { "ttl": "30d" } } },
+    "b_roll":      { "type": "number", "operation": { "store": { "ttl": "30d" } } },
+    "b_gyro":      { "type": "number", "operation": { "store": { "ttl": "30d" } } },
+    "b_fsr1":      { "type": "number", "operation": { "store": { "ttl": "30d" } } },
+    "b_fsr2":      { "type": "number", "operation": { "store": { "ttl": "30d" } } }
   }
 }

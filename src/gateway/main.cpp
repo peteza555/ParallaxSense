@@ -432,7 +432,8 @@ void publishShadow() {
       j.num(key, n.last.light_pct, 0);
     }
     if (n.last.flags & FLAG_FSR_OK) {
-      snprintf(key, sizeof(key), "%c_fsr", t);   j.num(key, n.last.fsr);
+      snprintf(key, sizeof(key), "%c_fsr1", t);  j.num(key, n.last.fsr1);
+      snprintf(key, sizeof(key), "%c_fsr2", t);  j.num(key, n.last.fsr2);
     }
   }
   j.raw("}}");

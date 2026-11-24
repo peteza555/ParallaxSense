@@ -492,7 +492,8 @@ void loop() {
     p.roll_deg     = outRoll();
     p.gyro_mag_dps = gyroMag;
     p.light_pct    = lightOk ? lightVal : 0;
-    p.fsr          = 0;
+    p.fsr1         = 0;
+    p.fsr2         = 0;
     esp_err_t err = esp_now_send(gatewayMac, (const uint8_t *)&p, sizeof(p));
     if (err != ESP_OK) Serial.printf("[NOW] esp_now_send error %d\n", (int)err);
   }
