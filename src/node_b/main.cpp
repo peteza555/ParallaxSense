@@ -1,10 +1,19 @@
 // ParallaxSense - Sensor Node B (เก้าอี้)
-// MPU6050 (gyro + accelerometer, I2C) + two analog FSRs -> ESP-NOW -> Gateway
+// MPU6050 (gyro + accelerometer, I2C) + two touch pads / FSRs -> ESP-NOW -> Gateway
 //
 // ต่อสาย:
-//   MPU6050 : VCC 3V3, GND GND, SDA GPIO21, SCL GPIO22, AD0 GND
-//   FSR 1   : ขาหนึ่ง -> 3V3; อีกขา -> GPIO32 และตัวต้านทาน 10kΩ ลง GND
-//   FSR 2   : ขาหนึ่ง -> 3V3; อีกขา -> GPIO33 และตัวต้านทาน 10kΩ ลง GND
+//   MPU6050 (Gyro/Accel): VCC 3V3, GND GND, SDA GPIO21, SCL GPIO22, AD0 GND
+//
+//   Touch Pad Option 1 (โมดูล Digital Touch เช่น TTP223):
+//     VCC -> 3V3, GND -> GND
+//     Touch Pad 1 SIG -> GPIO32
+//     Touch Pad 2 SIG -> GPIO33
+//     (ตั้ง -D TOUCH_DIGITAL=1 ใน platformio.ini)
+//
+//   Touch Pad Option 2 (แผ่นรับแรงกด FSR / Pressure touch pad):
+//     FSR 1: ขาหนึ่ง -> 3V3; อีกขา -> GPIO32 และตัวต้านทาน 10kΩ ลง GND
+//     FSR 2: ขาหนึ่ง -> 3V3; อีกขา -> GPIO33 และตัวต้านทาน 10kΩ ลง GND
+//     (โหมดเริ่มต้น -D TOUCH_DIGITAL=0 อ่านค่า analog 0-100%)
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -13,6 +22,8 @@
 #include <esp_wifi.h>
 #include <esp_idf_version.h>
 #include <math.h>
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
 #include "packet.h"
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -39,6 +50,12 @@ static const uint32_t RESCAN_AFTER_FAILS = 15;
 #ifndef FSR_INVERT
 #define FSR_INVERT 0
 #endif
+#ifndef TOUCH_DIGITAL
+#define TOUCH_DIGITAL 0
+#endif
+#ifndef TOUCH_CAPACITIVE
+#define TOUCH_CAPACITIVE 0
+#endif
 #ifndef IMU_SWAP_PITCH_ROLL
 #define IMU_SWAP_PITCH_ROLL 0
 #endif
@@ -50,7 +67,7 @@ static const uint32_t RESCAN_AFTER_FAILS = 15;
 #endif
 
 namespace mpu {
-const uint8_t ADDR = 0x68;
+static uint8_t ADDR = 0x68;
 const uint8_t REG_SMPLRT_DIV = 0x19;
 const uint8_t REG_CONFIG = 0x1A;
 const uint8_t REG_GYRO_CONFIG = 0x1B;
@@ -82,8 +99,15 @@ bool readRegs(uint8_t reg, uint8_t *buf, int len) {
 
 bool begin() {
   uint8_t who = 0;
-  if (!readRegs(REG_WHO_AM_I, &who, 1)) return false;
-  Serial.printf("[MPU] WHO_AM_I = 0x%02X\n", who);
+  ADDR = 0x68;
+  if (!readRegs(REG_WHO_AM_I, &who, 1)) {
+    ADDR = 0x69; // ตรวจสอบ address 0x69 เผื่อขา AD0 ต่อ 3V3 หรือลอย
+    if (!readRegs(REG_WHO_AM_I, &who, 1)) {
+      ADDR = 0x68;
+      return false;
+    }
+  }
+  Serial.printf("[MPU] WHO_AM_I = 0x%02X at address 0x%02X\n", who, ADDR);
   bool ok = writeReg(REG_PWR_MGMT_1, 0x01)
          && writeReg(REG_SMPLRT_DIV, 9)
          && writeReg(REG_CONFIG, 0x03)
@@ -112,10 +136,22 @@ bool read(Sample &s) {
 
 namespace fsr {
 float readPercent(int pin) {
+#if TOUCH_DIGITAL
+  bool touched = digitalRead(pin) == HIGH;
+  if (FSR_INVERT) touched = !touched;
+  return touched ? 100.0f : 0.0f;
+#elif TOUCH_CAPACITIVE
+  // ESP32 capacitive touchRead: ค่าลดลงเมื่อสัมผัส (ปกติ ~70-80, แตะแล้ว < 35)
+  uint16_t val = touchRead(pin);
+  bool touched = (val > 0 && val < 35);
+  if (FSR_INVERT) touched = !touched;
+  return touched ? 100.0f : 0.0f;
+#else
   uint32_t sumMv = 0;
   for (int i = 0; i < 8; i++) sumMv += analogReadMilliVolts(pin);
   float pct = constrain(sumMv / 8.0f / (float)FSR_FULL_SCALE_MV * 100.0f, 0.0f, 100.0f);
   return FSR_INVERT ? 100.0f - pct : pct;
+#endif
 }
 } // namespace fsr
 
@@ -271,7 +307,10 @@ bool tuneToGatewayChannel() {
     }
   }
   WiFi.scanDelete();
-  if (ch <= 0) return false;
+  if (ch <= 0) {
+    Serial.println("[NOW] SSID not found (hotspot off?) -> retry later");
+    return false;
+  }
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_channel((uint8_t)ch, WIFI_SECOND_CHAN_NONE);
   esp_wifi_set_promiscuous(false);
@@ -296,21 +335,29 @@ static float fsr1Percent = 0, fsr2Percent = 0;
 static uint32_t seq = 0, imuErrors = 0;
 
 void setup() {
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // ปิด brownout detector ป้องกัน reboot loop ตอนไฟกระชาก
   Serial.begin(115200);
   delay(300);
   Serial.println("\n=== ParallaxSense Node B ===");
 
   Wire.begin(PIN_SDA, PIN_SCL, 400000);
   imuOk = mpu::begin();
+#if TOUCH_DIGITAL
+  pinMode(FSR1_PIN, INPUT_PULLDOWN);
+  pinMode(FSR2_PIN, INPUT_PULLDOWN);
+#elif !TOUCH_CAPACITIVE
   pinMode(FSR1_PIN, INPUT);
   pinMode(FSR2_PIN, INPUT);
+#endif
   calib::begin();
   if (imuOk) calib::run();
-  Serial.printf("[I2C] MPU6050 %s | FSR analog GPIO%d + GPIO%d\n",
-                imuOk ? "OK" : "FAIL", FSR1_PIN, FSR2_PIN);
+  const char *tmode = TOUCH_DIGITAL ? "digital touch pad" : (TOUCH_CAPACITIVE ? "capacitive touchRead" : "analog FSR");
+  Serial.printf("[I2C] MPU6050 %s | %s on GPIO%d + GPIO%d\n",
+                imuOk ? "OK" : "FAIL", tmode, FSR1_PIN, FSR2_PIN);
   Serial.println("[CAL] press BOOT button anytime to re-zero");
 
   WiFi.mode(WIFI_STA);
+  WiFi.setTxPower(WIFI_POWER_15dBm); // ลดกำลังส่งเล็กน้อยเพื่อลด peak current ตอนเปิดวิทยุ
   WiFi.disconnect();
   Serial.printf("[NOW] my MAC = %s\n", WiFi.macAddress().c_str());
   while (!tuneToGatewayChannel()) delay(3000);

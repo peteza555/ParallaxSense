@@ -125,9 +125,14 @@ void handlePacket(const RxItem &it) {
   n.received++;
 
   if (p.seq % 5 == 0) {  // พิมพ์ ~1 บรรทัด/วินาที/โหนด พอให้เห็นในวิดีโอ
-    Serial.printf("[RX] node %c seq=%lu pitch=%.1f roll=%.1f gyro=%.1f light=%.0f%% rssi=%d PDR=%.1f%%\n",
-                  toupper(nodeTag(p.node_id)), (unsigned long)p.seq, p.pitch_deg, p.roll_deg,
-                  p.gyro_mag_dps, p.light_pct, it.rssi, nodePdr(n));
+    if (p.node_id == NODE_B) {
+      Serial.printf("[RX] node B seq=%lu pitch=%.1f roll=%.1f gyro=%.1f fsr1=%.0f%% fsr2=%.0f%% rssi=%d PDR=%.1f%%\n",
+                    (unsigned long)p.seq, p.pitch_deg, p.roll_deg, p.gyro_mag_dps, p.fsr1, p.fsr2, it.rssi, nodePdr(n));
+    } else {
+      Serial.printf("[RX] node %c seq=%lu pitch=%.1f roll=%.1f gyro=%.1f light=%.0f%% rssi=%d PDR=%.1f%%\n",
+                    toupper(nodeTag(p.node_id)), (unsigned long)p.seq, p.pitch_deg, p.roll_deg,
+                    p.gyro_mag_dps, p.light_pct, it.rssi, nodePdr(n));
+    }
   }
 }
 
